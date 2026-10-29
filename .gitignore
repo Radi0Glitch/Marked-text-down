@@ -1,0 +1,7 @@
+build/
+selftest*
+selftest_*
+test/
+build-win*
+dist/
+tools/pandoc/
