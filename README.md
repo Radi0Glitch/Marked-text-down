@@ -1,4 +1,4 @@
-# Marked-text-down
+<img width="1887" height="1014" alt="image" src="https://github.com/user-attachments/assets/fe967498-e3af-4004-8491-513562acc989" /># Marked-text-down
 
 Лёгкий кроссплатформенный визуальный (WYSIWYG) редактор Markdown. Вы работаете с живым отформатированным текстом и визуальными блоками без служебной разметки на экране, а на диске сохраняется чистый стандартный `.md`-файл.
 
@@ -27,6 +27,11 @@
   - Переключение языка интерфейса (**Русский / English**).
   - Стартовое окно обзора возможностей (`F1` или кнопка `?`) с запоминанием настроек между запусками.
   - Полноценная история изменений (**Undo / Redo** — `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z`).
+  
+  ![скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image.png)
+  ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(2).png)
+  ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(7).png)
+  ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(8).png)
 
 ---
 
