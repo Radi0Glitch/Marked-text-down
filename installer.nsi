@@ -5,6 +5,8 @@ Unicode True
 
 Name "Marked-text-down"
 OutFile "..\Marked-text-down-Setup-x86_64.exe"
+Icon "mtd-logo.ico"
+UninstallIcon "mtd-logo.ico"
 InstallDir "$PROGRAMFILES64\Marked-text-down"
 InstallDirRegKey HKLM "Software\Marked-text-down" "Install_Dir"
 RequestExecutionLevel admin
@@ -54,9 +56,9 @@ Section "Marked-text-down" SecMain
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateDirectory "$SMPROGRAMS\Marked-text-down"
-  CreateShortcut "$SMPROGRAMS\Marked-text-down\Marked-text-down.lnk" "$INSTDIR\marked-text-down.exe"
-  CreateShortcut "$SMPROGRAMS\Marked-text-down\Uninstall.lnk" "$INSTDIR\uninstall.exe"
-  CreateShortcut "$DESKTOP\Marked-text-down.lnk" "$INSTDIR\marked-text-down.exe"
+  CreateShortcut "$SMPROGRAMS\Marked-text-down\Marked-text-down.lnk" "$INSTDIR\marked-text-down.exe" "" "$INSTDIR\marked-text-down.exe" 0
+  CreateShortcut "$SMPROGRAMS\Marked-text-down\Uninstall.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\uninstall.exe" 0
+  CreateShortcut "$DESKTOP\Marked-text-down.lnk" "$INSTDIR\marked-text-down.exe" "" "$INSTDIR\marked-text-down.exe" 0
 
   ; --- File associations for .md / .markdown ---
   WriteRegStr HKLM "Software\Classes\MarkedTextDown.Markdown" "" "Markdown-документ (Marked-text-down)"

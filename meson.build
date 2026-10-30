@@ -41,9 +41,24 @@ if host_machine.system() == 'windows'
   ]
 endif
 
+if host_machine.system() == 'windows'
+  # Embed the application icon and version info into the exe.
+  # windres runs on the build host, so an absolute source path works for both
+  # native Windows builds and mingw cross-builds on Linux.
+  windows = import('windows')
+  rc_conf = configuration_data()
+  rc_conf.set('ICON_PATH', meson.project_source_root() / 'packaging' / 'icons' / 'mtd-logo.ico')
+  app_rc = configure_file(input: 'packaging/windows/app.rc.in',
+                          output: 'app.rc',
+                          configuration: rc_conf)
+  windows_resources = windows.compile_resources(app_rc)
+else
+  windows_resources = []
+endif
+
 executable(
   'marked-text-down',
-  sources,
+  sources + windows_resources,
   vendored,
   dependencies: deps,
   include_directories: include_directories('third_party/md4c', 'third_party/tinyfiledialogs'),
@@ -62,6 +77,11 @@ if host_machine.system() != 'windows'
                install_dir: get_option('datadir') / 'marked-text-down' / 'fonts')
   install_data('marked-text-down.desktop',
                install_dir: get_option('datadir') / 'applications')
-  install_data('marked-text-down.svg',
+  # The .desktop file references Icon=marked-text-down, so install the logo
+  # under that name (renamed copy generated in the build directory).
+  app_icon = configure_file(input: 'mtd-logo.svg',
+                            output: 'marked-text-down.svg',
+                            copy: true)
+  install_data(app_icon,
                install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps')
 endif
