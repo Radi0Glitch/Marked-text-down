@@ -86,12 +86,19 @@ ninja -C build
 sudo ninja -C build install
 ```
 
-### Сборка пакета для Arch Linux (AUR)
+### Arch Linux: сборка пакета из git (PKGBUILD)
+
+Пакет в AUR пока не опубликован, но `PKGBUILD` уже лежит в репозитории
+и тянет исходники напрямую из git — собирается и ставится без AUR:
 
 ```sh
-cd packaging/aur
+git clone https://github.com/Radi0Glitch/Marked-text-down.git
+cd Marked-text-down/packaging/aur
 makepkg -si            # собирает marked-text-down-git и устанавливает
 ```
+
+Когда пакет будет опубликован в AUR, станет доступна обычная установка
+`yay -S marked-text-down-git` — сам `PKGBUILD` не изменится.
 
 ---
 
