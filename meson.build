@@ -50,6 +50,9 @@ executable(
   cpp_args: ['-DPROJECT_SOURCE_DIR="@0@"'.format(meson.project_source_root())],
   win_subsystem: 'windows',
   install: true,
+  link_args: host_machine.system() == 'windows'
+    ? ['-static', '-static-libgcc', '-static-libstdc++']
+    : [],
 )
 
 if host_machine.system() != 'windows'

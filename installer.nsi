@@ -57,7 +57,6 @@ Section "Marked-text-down" SecMain
   CreateShortcut "$SMPROGRAMS\Marked-text-down\Marked-text-down.lnk" "$INSTDIR\marked-text-down.exe"
   CreateShortcut "$SMPROGRAMS\Marked-text-down\Uninstall.lnk" "$INSTDIR\uninstall.exe"
   CreateShortcut "$DESKTOP\Marked-text-down.lnk" "$INSTDIR\marked-text-down.exe"
-  CreateShortcut "$INSTDIR\Marked-text-down.lnk" "$INSTDIR\marked-text-down.exe" "" "" "Marked-text-down Markdown editor"
 
   ; --- File associations for .md / .markdown ---
   WriteRegStr HKLM "Software\Classes\MarkedTextDown.Markdown" "" "Markdown-документ (Marked-text-down)"
@@ -101,7 +100,6 @@ Section "Uninstall"
   Delete "$INSTDIR\SDL3_ttf.dll"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\uninstall.exe"
-  Delete "$INSTDIR\Marked-text-down.lnk"
 
   RMDir /r "$INSTDIR\fonts"
   RMDir /r "$INSTDIR\tools"
