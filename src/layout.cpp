@@ -356,7 +356,7 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
 
     for (size_t bi = 0; bi < doc.blocks.size(); ++bi) {
         const Block& block = doc.blocks[bi];
-        const BlockMetrics metrics = metrics_for(block, bi == 0);
+        BlockMetrics metrics = metrics_for(block, bi == 0);
 
         // A list ends with a little more air before the next block.
         if (bi > 0 && doc.blocks[bi - 1].type == BlockType::ListItem
@@ -383,6 +383,16 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
             marker = "\u2022";
         }
         out.markers.push_back(marker);
+
+        // The marker is painted left of the text column (x0 - 10 - marker_width),
+        // so two- and three-digit numbers need a wider indent than the default
+        // bullet layout, otherwise the leading digits get cut off.
+        if (block.type == BlockType::ListItem && !marker.empty()) {
+            TTF_Font* mf = font_for(fonts, block, 0);
+            const float mw = measure(mf, marker, 0, static_cast<int>(marker.size()));
+            const float needed = 10.0f + mw + 6.0f;
+            if (metrics.indent < needed) metrics.indent = needed;
+        }
 
         y += metrics.pad_before;
 

@@ -1,0 +1,20 @@
+pkgbase = marked-text-down-git
+	pkgdesc = Lightweight cross-platform visual (WYSIWYG) Markdown editor with formulas, diagrams and charts
+	pkgver = r1.0.1
+	pkgrel = 1
+	url = https://github.com/Radi0Glitch/Marked-text-down
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	makedepends = meson
+	makedepends = ninja
+	depends = sdl3
+	depends = sdl3_ttf
+	optdepends = pandoc: export to DOCX/PDF/HTML/ODT/EPUB
+	optdepends = typst: PDF export engine used by Pandoc
+	provides = marked-text-down
+	conflicts = marked-text-down
+	source = marked-text-down-git::git+https://github.com/Radi0Glitch/Marked-text-down.git
+	sha256sums = SKIP
+
+pkgname = marked-text-down-git

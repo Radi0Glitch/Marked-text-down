@@ -3497,6 +3497,38 @@ int main(int argc, char** argv) {
                 return fail("nested numbering failed");
             }
             ed.indent(-1);
+
+            // Multi-digit numbering: the marker must never be clipped at the
+            // left edge of the content column (indent follows marker width).
+            {
+                md::Document wide;
+                for (int i = 0; i < 15; ++i) {
+                    md::Block b;
+                    b.type = md::BlockType::ListItem;
+                    b.ordered = true;
+                    b.inlines.push_back(md::Inline{"пункт", 0, ""});
+                    wide.blocks.push_back(std::move(b));
+                }
+                md::Layout wl;
+                md::layout_document(wide, app.fontbook, 760.0f, wl);
+                bool wide_ok = true;
+                for (const md::Line& ln : wl.lines) {
+                    if (ln.block < 0 || static_cast<size_t>(ln.block) >= wl.markers.size()) continue;
+                    const std::string& mk = wl.markers[static_cast<size_t>(ln.block)];
+                    if (mk.empty()) continue;
+                    TTF_Font* mf = app.fontbook.get(md::Family::Sans, false, false, 17.0f);
+                    int mw = 0, mh = 0;
+                    TTF_GetStringSize(mf, mk.c_str(), mk.size(), &mw, &mh);
+                    if (ln.x0 - 10.0f - static_cast<float>(mw) < 0.0f) {
+                        wide_ok = false;
+                        std::fprintf(stderr, "selftest: list marker '%s' clipped (x0=%.1f mw=%d)\n",
+                                     mk.c_str(), ln.x0, mw);
+                    }
+                }
+                if (!wide_ok || wl.markers.back() != "15.") {
+                    return fail("multi-digit list marker indent failed");
+                }
+            }
             if (d.blocks[2].depth != 0) {
                 return fail("outdent failed");
             }
