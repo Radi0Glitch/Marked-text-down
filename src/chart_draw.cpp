@@ -113,6 +113,19 @@ int nice_ticks(double vmax) {
     return 4;
 }
 
+// Truncate label with ellipsis so it fits inside `max_w` without splitting UTF-8.
+std::string fit_chart_label(TTF_Font* font, std::string text, float max_w) {
+    if (max_w <= 8.0f || ui::text_width(font, text) <= max_w) return text;
+    while (!text.empty() && ui::text_width(font, text + "…") > max_w) {
+        size_t start = text.size() - 1;
+        while (start > 0 && (static_cast<unsigned char>(text[start]) & 0xC0) == 0x80) {
+            --start;
+        }
+        text.erase(start);
+    }
+    return text.empty() ? std::string("…") : text + "…";
+}
+
 Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
                float x, float y, float max_w, const Selection* selected,
                std::vector<Slot>* slots, bool line) {
@@ -128,15 +141,15 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
     double vmax = 0.0;
     for (const std::string& s : m.values) vmax = std::max(vmax, std::fabs(chart_value(s)));
 
-    // Size the chart to fit the column.
+    // Size the chart to fit the full block width.
     float total_w = max_w;
     if (total_w < 220.0f) total_w = 220.0f;
-    if (total_w > 420.0f) total_w = 420.0f; // keep it readable, not huge
-    float plot_h = std::min(190.0f, total_w * 0.42f);
-    const float left = kPad + kAxisGap;
-    const float bottom_pad = kPad + lh + 10.0f;
-    const float top_pad = kPad + (m.title.empty() ? 0.0f : kTitleH);
-    const float plot_w = total_w - left - kPad - 10.0f;
+    if (total_w > 1200.0f) total_w = 1200.0f;
+    float plot_h = std::clamp(total_w * 0.30f, 150.0f, 210.0f);
+    const float left = kPad + kAxisGap + 8.0f;
+    const float bottom_pad = kPad + lh + 16.0f;
+    const float top_pad = kPad + (m.title.empty() ? 0.0f : kTitleH) + lh + 8.0f;
+    const float plot_w = std::max(120.0f, total_w - left - kPad - 10.0f);
     const float plot_x = x + left;
     const float plot_y = y + top_pad;
     const float plot_bottom = plot_y + plot_h;
@@ -177,6 +190,7 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
 
     const float group_w = plot_w / static_cast<float>(n);
     std::vector<SDL_FPoint> pts;
+    const bool edit_mode = (selected != nullptr || slots != nullptr);
 
     for (size_t i = 0; i < n; ++i) {
         const double v = chart_value(m.values[i]);
@@ -184,57 +198,92 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
                                      : plot_h * static_cast<float>(v / vmax);
         const float cx = plot_x + group_w * (static_cast<float>(i) + 0.5f);
         const float ty = plot_bottom - h;
+        const bool sel_cat = is_selected(selected, static_cast<int>(i), false);
+        const bool sel_val = is_selected(selected, static_cast<int>(i), true);
 
         if (line) {
             pts.push_back({cx, ty});
         } else {
-            const float bw = std::min(44.0f, group_w - kBarGap);
+            const float bw = std::max(6.0f, std::min(52.0f, group_w - kBarGap));
             const ui::Rect br{cx - bw / 2.0f, ty, bw, h};
             const SDL_Color bc = bar_color(i);
-            ui::fill_rect(*ctx, br, bc);
-            if (is_selected(selected, static_cast<int>(i), false)
-                || is_selected(selected, static_cast<int>(i), true)) {
-                ui::stroke_rect(*ctx, br, ctx->palette.accent);
+            if (h > 0.0f) {
+                ui::fill_rect(*ctx, br, bc);
+            }
+            if (sel_cat || sel_val) {
+                ui::stroke_rect(*ctx, {br.x - 1.0f, std::min(br.y, plot_bottom - 4.0f),
+                                       br.w + 2.0f, std::max(br.h, 4.0f)},
+                                ctx->palette.accent);
             }
         }
 
         // Category label under the group (clickable slot).
-        const std::string& cl = m.labels[i];
+        const float max_cell_w = std::max(24.0f, group_w - 4.0f);
+        const std::string raw_cl = m.labels[i];
+        const std::string cl = fit_chart_label(f, raw_cl, max_cell_w - 8.0f);
+        const float slw = cl.empty() ? std::min(36.0f, max_cell_w - 4.0f)
+                                     : std::max(24.0f, ui::text_width(f, cl) + 10.0f);
+        const ui::Rect cat_rect{cx - slw / 2.0f, plot_bottom + 5.0f, slw, lh + 6.0f};
         if (slots) {
-            const float slw = ui::text_width(f, cl.empty() ? " " : cl);
-            slots->push_back(Slot{
-                static_cast<int>(i), false,
-                {cx - slw / 2.0f - 6.0f, plot_bottom + 6.0f, slw + 12.0f, lh + 6.0f}});
+            slots->push_back(Slot{static_cast<int>(i), false, cat_rect});
+        }
+        if (sel_cat) {
+            ui::fill_rounded_rect(*ctx, cat_rect, 4.0f, ctx->palette.button_active);
+            ui::stroke_rect(*ctx, cat_rect, ctx->palette.accent);
+        } else if (edit_mode) {
+            dotted_box(*ctx, cat_rect, ctx->palette.panel_border);
         }
         if (cl.empty()) {
-            dotted_box(*ctx, {cx - 18.0f, plot_bottom + 8.0f, 36.0f, 12.0f},
-                       ctx->palette.text_dim);
+            if (!edit_mode) {
+                dotted_box(*ctx, {cx - 14.0f, plot_bottom + 8.0f, 28.0f, 12.0f},
+                           ctx->palette.text_dim);
+            }
+            if (sel_cat) {
+                ui::fill_rect(*ctx, {cx, cat_rect.y + 3.0f, 1.5f, lh}, ctx->palette.accent);
+            }
         } else {
-            const float slw = ui::text_width(f, cl);
-            ui::draw_text(*ctx, f, cl, cx - slw / 2.0f, plot_bottom + 8.0f,
-                          is_selected(selected, static_cast<int>(i), false)
-                              ? ctx->palette.accent
-                              : ctx->palette.text_dim);
+            const float tw = ui::text_width(f, cl);
+            ui::draw_text(*ctx, f, cl, cx - tw / 2.0f, cat_rect.y + 3.0f,
+                          sel_cat ? ctx->palette.accent : ctx->palette.text_dim);
+            if (sel_cat) {
+                ui::fill_rect(*ctx, {cx + tw / 2.0f + 1.5f, cat_rect.y + 3.0f, 1.5f, lh},
+                              ctx->palette.accent);
+            }
         }
 
         // Value label above the bar/point (clickable).
+        const std::string raw_vl = m.values[i].empty() ? (edit_mode ? "" : "0") : m.values[i];
+        const std::string vl = fit_chart_label(f, raw_vl, max_cell_w - 6.0f);
+        const float vlw = vl.empty() ? std::min(30.0f, max_cell_w - 4.0f)
+                                     : std::max(24.0f, ui::text_width(f, vl) + 10.0f);
+        const float val_y = std::max(y + (m.title.empty() ? 4.0f : kTitleH + 6.0f),
+                                     ty - lh - 9.0f);
+        const ui::Rect val_rect{cx - vlw / 2.0f, val_y, vlw, lh + 6.0f};
         if (slots) {
-            const std::string vl = m.values[i].empty() ? "0" : m.values[i];
-            const float vlw = ui::text_width(f, vl);
-            slots->push_back(Slot{
-                static_cast<int>(i), true,
-                {cx - vlw / 2.0f - 6.0f, ty - lh - 8.0f, vlw + 12.0f, lh + 6.0f}});
+            slots->push_back(Slot{static_cast<int>(i), true, val_rect});
         }
-        if (h > 0.0f) {
-            const std::string vl = m.values[i].empty() ? "0" : m.values[i];
-            const float vlw = ui::text_width(f, vl);
-            ui::draw_text(*ctx, f, vl, cx - vlw / 2.0f, ty - lh - 6.0f,
-                          is_selected(selected, static_cast<int>(i), true)
-                              ? ctx->palette.accent
-                              : ctx->palette.text);
+        if (sel_val) {
+            ui::fill_rounded_rect(*ctx, val_rect, 4.0f, ctx->palette.button_active);
+            ui::stroke_rect(*ctx, val_rect, ctx->palette.accent);
+        } else if (edit_mode) {
+            dotted_box(*ctx, val_rect, ctx->palette.panel_border);
+        }
+        if (!vl.empty() && (h > 0.0f || edit_mode)) {
+            const float tw = ui::text_width(f, vl);
+            ui::draw_text(*ctx, f, vl, cx - tw / 2.0f, val_rect.y + 3.0f,
+                          sel_val ? ctx->palette.accent : ctx->palette.text);
+            if (sel_val) {
+                ui::fill_rect(*ctx, {cx + tw / 2.0f + 1.5f, val_rect.y + 3.0f, 1.5f, lh},
+                              ctx->palette.accent);
+            }
         } else {
-            dotted_box(*ctx, {cx - 12.0f, ty - lh - 6.0f, 24.0f, 12.0f},
-                       ctx->palette.text_dim);
+            if (!edit_mode) {
+                dotted_box(*ctx, {cx - 12.0f, val_rect.y + 4.0f, 24.0f, 12.0f},
+                           ctx->palette.text_dim);
+            }
+            if (sel_val) {
+                ui::fill_rect(*ctx, {cx, val_rect.y + 3.0f, 1.5f, lh}, ctx->palette.accent);
+            }
         }
     }
 
@@ -269,19 +318,20 @@ Size render_pie(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
     }
 
     float size = max_w * 0.48f;
-    if (size < 110.0f) size = 110.0f;
-    if (size > 150.0f) size = 150.0f;
+    if (size < 120.0f) size = 120.0f;
+    if (size > 170.0f) size = 170.0f;
     const float top_pad = kPad + (m.title.empty() ? 0.0f : kTitleH);
-    const float legend_x = x + size + kPad * 2.0f;
+    const float legend_x = x + size + kPad * 2.5f;
     float legend_y = y + top_pad + 10.0f;
-    const float total_h = top_pad + size + kPad * 2.0f;
-    const float total_w = legend_x + 140.0f;
+    const float legend_h = static_cast<float>(n) * (lh + 10.0f) + 20.0f;
+    const float total_h = top_pad + std::max(size, legend_h) + kPad * 2.0f;
+    const float total_w = max_w;
 
-    if (!ctx) return {std::min(total_w, max_w), total_h};
+    if (!ctx) return {total_w, total_h};
 
     if (!m.title.empty()) {
         const float tw = ui::text_width(ft, m.title);
-        ui::draw_text(*ctx, ft, m.title, x + (std::min(total_w, max_w) - tw) / 2.0f,
+        ui::draw_text(*ctx, ft, m.title, x + (total_w - tw) / 2.0f,
                       y + kPad, ctx->palette.text);
     }
 
@@ -306,7 +356,8 @@ Size render_pie(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
         }
         const SDL_Color c = kPieCols[i % 8];
         fill_poly(*ctx, poly, c);
-        if (is_selected(selected, static_cast<int>(i), true)) {
+        if (is_selected(selected, static_cast<int>(i), true)
+            || is_selected(selected, static_cast<int>(i), false)) {
             set_color(*ctx, ctx->palette.accent);
             for (size_t p = 0; p < poly.size(); ++p) {
                 SDL_RenderLine(ctx->renderer, poly[p].x, poly[p].y,
@@ -318,39 +369,58 @@ Size render_pie(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
     }
 
     // Legend: labels and values are both clickable.
+    const bool edit_mode = (selected != nullptr || slots != nullptr);
     legend_y = y + top_pad + 16.0f;
     for (size_t i = 0; i < n; ++i) {
         const SDL_Color c = kPieCols[i % 8];
-        ui::fill_rect(*ctx, {legend_x, legend_y, 10.0f, 10.0f}, c);
-        const std::string cl = m.labels[i].empty() ? "Доля" : m.labels[i];
-        const std::string vl = m.values[i].empty() ? "0" : m.values[i];
-        const float label_w = ui::text_width(f, cl);
-        const float val_w = ui::text_width(f, vl);
-        const float gap = 16.0f;
+        const bool sel_cat = is_selected(selected, static_cast<int>(i), false);
+        const bool sel_val = is_selected(selected, static_cast<int>(i), true);
+        ui::fill_rect(*ctx, {legend_x, legend_y + 2.0f, 10.0f, 10.0f}, c);
+        const std::string cl = m.labels[i].empty() ? (edit_mode ? "" : "Доля") : m.labels[i];
+        const std::string vl = m.values[i].empty() ? (edit_mode ? "" : "0") : m.values[i];
+        const float label_w = std::max(36.0f, ui::text_width(f, cl) + 12.0f);
+        const float val_w = std::max(30.0f, ui::text_width(f, vl) + 12.0f);
+        const float gap = 14.0f;
+        const ui::Rect cat_rect{legend_x + 16.0f, legend_y - 2.0f, label_w, lh + 6.0f};
+        const ui::Rect val_rect{legend_x + 16.0f + label_w + gap, legend_y - 2.0f, val_w, lh + 6.0f};
         if (slots) {
-            slots->push_back(Slot{
-                static_cast<int>(i), false,
-                {legend_x + 12.0f, legend_y - 2.0f, label_w + 12.0f, lh + 8.0f}});
-            slots->push_back(Slot{
-                static_cast<int>(i), true,
-                {legend_x + 16.0f + label_w + gap - 2.0f,
-                 legend_y - 2.0f, val_w + 12.0f, lh + 8.0f}});
+            slots->push_back(Slot{static_cast<int>(i), false, cat_rect});
+            slots->push_back(Slot{static_cast<int>(i), true, val_rect});
         }
-        ui::draw_text(*ctx, f, cl,
-                      legend_x + 16.0f, legend_y - 1.0f,
-                      is_selected(selected, static_cast<int>(i), false)
-                          ? ctx->palette.accent
-                          : ctx->palette.text);
-        ui::draw_text(*ctx, f, vl,
-                      legend_x + 16.0f + label_w + gap,
-                      legend_y - 1.0f,
-                      is_selected(selected, static_cast<int>(i), true)
-                          ? ctx->palette.accent
-                          : ctx->palette.text);
+        if (sel_cat) {
+            ui::fill_rounded_rect(*ctx, cat_rect, 4.0f, ctx->palette.button_active);
+            ui::stroke_rect(*ctx, cat_rect, ctx->palette.accent);
+        } else if (edit_mode) {
+            dotted_box(*ctx, cat_rect, ctx->palette.panel_border);
+        }
+        if (sel_val) {
+            ui::fill_rounded_rect(*ctx, val_rect, 4.0f, ctx->palette.button_active);
+            ui::stroke_rect(*ctx, val_rect, ctx->palette.accent);
+        } else if (edit_mode) {
+            dotted_box(*ctx, val_rect, ctx->palette.panel_border);
+        }
+        if (!cl.empty()) {
+            ui::draw_text(*ctx, f, cl, cat_rect.x + 6.0f, legend_y + 1.0f,
+                          sel_cat ? ctx->palette.accent : ctx->palette.text);
+        }
+        if (sel_cat) {
+            const float cw = cl.empty() ? 0.0f : ui::text_width(f, cl);
+            ui::fill_rect(*ctx, {cat_rect.x + 6.0f + cw + 1.5f, legend_y + 1.0f, 1.5f, lh},
+                          ctx->palette.accent);
+        }
+        if (!vl.empty()) {
+            ui::draw_text(*ctx, f, vl, val_rect.x + 6.0f, legend_y + 1.0f,
+                          sel_val ? ctx->palette.accent : ctx->palette.text);
+        }
+        if (sel_val) {
+            const float vw = vl.empty() ? 0.0f : ui::text_width(f, vl);
+            ui::fill_rect(*ctx, {val_rect.x + 6.0f + vw + 1.5f, legend_y + 1.0f, 1.5f, lh},
+                          ctx->palette.accent);
+        }
         legend_y += lh + 10.0f;
     }
 
-    return {std::min(total_w, max_w), total_h};
+    return {total_w, total_h};
 }
 
 } // namespace

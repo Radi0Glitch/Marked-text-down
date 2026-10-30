@@ -1,7 +1,7 @@
 project(
   'Marked-text-down',
   ['c', 'cpp'],
-  version: '0.1.0',
+  version: '1.0.1',
   default_options: ['c_std=c11', 'cpp_std=c++17', 'warning_level=2'],
 )
 
@@ -49,4 +49,16 @@ executable(
   include_directories: include_directories('third_party/md4c', 'third_party/tinyfiledialogs'),
   cpp_args: ['-DPROJECT_SOURCE_DIR="@0@"'.format(meson.project_source_root())],
   win_subsystem: 'windows',
+  install: true,
 )
+
+if host_machine.system() != 'windows'
+  install_data('fonts/FiraSans-Regular.ttf', 'fonts/FiraSans-Bold.ttf',
+               'fonts/FiraSans-Italic.ttf', 'fonts/FiraSans-BoldItalic.ttf',
+               'fonts/FiraMono-Regular.ttf', 'fonts/FiraMono-Bold.ttf',
+               install_dir: get_option('datadir') / 'marked-text-down' / 'fonts')
+  install_data('marked-text-down.desktop',
+               install_dir: get_option('datadir') / 'applications')
+  install_data('marked-text-down.svg',
+               install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps')
+endif

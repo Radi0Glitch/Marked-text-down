@@ -213,15 +213,15 @@ static std::string to_latex_inner(const MathNode& node) {
             return "{" + to_latex_inner(node.slots[0]) + "}_{ " + to_latex_inner(node.slots[1]) + " }^{ " + to_latex_inner(node.slots[2]) + " }";
         case MathNode::Sum:
             if (node.slots.size() == 3)
-                return "\\sum_{ " + to_latex_inner(node.slots[0]) + " }^{ " + to_latex_inner(node.slots[1]) + " } " + to_latex_inner(node.slots[2]);
+                return "\\sum_{ " + to_latex_inner(node.slots[0]) + " }^{ " + to_latex_inner(node.slots[1]) + " }{" + to_latex_inner(node.slots[2]) + "}";
             return "\\sum";
         case MathNode::Prod:
             if (node.slots.size() == 3)
-                return "\\prod_{ " + to_latex_inner(node.slots[0]) + " }^{ " + to_latex_inner(node.slots[1]) + " } " + to_latex_inner(node.slots[2]);
+                return "\\prod_{ " + to_latex_inner(node.slots[0]) + " }^{ " + to_latex_inner(node.slots[1]) + " }{" + to_latex_inner(node.slots[2]) + "}";
             return "\\prod";
         case MathNode::Int:
             if (node.slots.size() == 3)
-                return "\\int_{ " + to_latex_inner(node.slots[0]) + " }^{ " + to_latex_inner(node.slots[1]) + " } " + to_latex_inner(node.slots[2]);
+                return "\\int_{ " + to_latex_inner(node.slots[0]) + " }^{ " + to_latex_inner(node.slots[1]) + " }{" + to_latex_inner(node.slots[2]) + "}";
             return "\\int";
         case MathNode::Parens:
             return "\\left(" + (node.slots.empty() ? "\\," : to_latex_inner(node.slots[0])) + "\\right)";
@@ -364,11 +364,35 @@ struct LatexParser {
                         if (p < s.size() && (s[p] == '_' || s[p] == '^')) {
                             const bool lower = s[p] == '_';
                             ++p;
-                            const std::string g = group();
+                            ws();
+                            std::string g;
+                            if (p < s.size() && s[p] == '{') {
+                                g = group();
+                            } else if (p < s.size()) {
+                                g = std::string(1, s[p++]);
+                            }
                             n.slots[lower ? 0 : 1] = math_from_latex(g);
                         }
                     }
-                    n.slots[2] = parse_seq(); // body until stop
+                    ws();
+                    if (p < s.size() && s[p] == '{') {
+                        n.slots[2] = math_from_latex(group());
+                    } else {
+                        // Read body until top-level '=', '+', '-', or end
+                        const size_t body_start = p;
+                        int depth = 0;
+                        while (p < s.size()) {
+                            if (s[p] == '{') ++depth;
+                            else if (s[p] == '}') {
+                                if (depth == 0) break;
+                                --depth;
+                            } else if (depth == 0 && (s[p] == '=' || s[p] == '+' || s[p] == '-')) {
+                                break;
+                            }
+                            ++p;
+                        }
+                        n.slots[2] = math_from_latex(s.substr(body_start, p - body_start));
+                    }
                     kids.push_back(std::move(n));
                     continue;
                 }
@@ -434,7 +458,7 @@ struct LatexParser {
                     kids.push_back(std::move(n));
                     continue;
                 }
-                if (lit("\\,")) continue; // thin space: cosmetic only
+                if (lit("\\,") || lit("\\quad") || lit("\\qquad") || lit("\\;") || lit("\\:")) continue; // cosmetic spacing
                 if (lit("\\textbackslash{}")) { push_text("\\"); continue; }
                 if (lit("\\^{ }")) { push_text("^"); continue; }
                 if (lit("\\^{}")) { push_text("^"); continue; }
@@ -444,25 +468,82 @@ struct LatexParser {
                     p += 2;
                     continue;
                 }
-                // unknown command: skip the backslash and the word
+                // Known math symbols & Greek commands -> UTF-8 symbol
                 ++p;
+                const size_t cmd_start = p;
                 while (p < s.size() && ((s[p] >= 'a' && s[p] <= 'z') || (s[p] >= 'A' && s[p] <= 'Z'))) ++p;
+                const std::string cmd = s.substr(cmd_start, p - cmd_start);
+                static const std::pair<const char*, const char*> kCmdMap[] = {
+                    {"alpha", "α"}, {"beta", "β"}, {"gamma", "γ"}, {"delta", "δ"},
+                    {"epsilon", "ε"}, {"varepsilon", "ε"}, {"zeta", "ζ"}, {"eta", "η"},
+                    {"theta", "θ"}, {"vartheta", "θ"}, {"iota", "ι"}, {"kappa", "κ"},
+                    {"lambda", "λ"}, {"mu", "μ"}, {"nu", "ν"}, {"xi", "ξ"},
+                    {"pi", "π"}, {"rho", "ρ"}, {"sigma", "σ"}, {"tau", "τ"},
+                    {"upsilon", "υ"}, {"phi", "φ"}, {"varphi", "φ"}, {"chi", "χ"},
+                    {"psi", "ψ"}, {"omega", "ω"},
+                    {"Gamma", "Γ"}, {"Delta", "Δ"}, {"Theta", "Θ"}, {"Lambda", "Λ"},
+                    {"Xi", "Ξ"}, {"Pi", "Π"}, {"Sigma", "Σ"}, {"Phi", "Φ"},
+                    {"Psi", "Ψ"}, {"Omega", "Ω"},
+                    {"pm", "±"}, {"mp", "∓"}, {"times", "×"}, {"div", "÷"},
+                    {"cdot", "·"}, {"neq", "≠"}, {"ne", "≠"}, {"leq", "≤"}, {"le", "≤"},
+                    {"geq", "≥"}, {"ge", "≥"}, {"approx", "≈"}, {"equiv", "≡"},
+                    {"to", "→"}, {"rightarrow", "→"}, {"leftarrow", "←"}, {"Rightarrow", "⇒"},
+                    {"infty", "∞"}, {"partial", "∂"}, {"nabla", "∇"}, {"forall", "∀"},
+                    {"exists", "∃"}, {"in", "∈"}, {"notin", "∉"}, {"subset", "⊂"},
+                    {"cup", "∪"}, {"cap", "∩"}, {"dots", "…"}, {"ldots", "…"}, {"cdots", "…"},
+                    {"sin", "sin"}, {"cos", "cos"}, {"tan", "tan"}, {"tg", "tg"},
+                    {"ctg", "ctg"}, {"log", "log"}, {"ln", "ln"}, {"lim", "lim"},
+                    {"exp", "exp"}, {"min", "min"}, {"max", "max"}
+                };
+                for (const auto& kv : kCmdMap) {
+                    if (cmd == kv.first) {
+                        push_text(kv.second);
+                        break;
+                    }
+                }
                 continue;
             }
             if (s[p] == '^' || s[p] == '_') {
                 const bool lower = s[p] == '_';
                 ++p;
-                const std::string g = group();
-                // base is the previous child
-                MathNode base = kids.empty() ? MathNode{MathNode::Seq, {}, {}}
-                                             : std::move(kids.back());
-                if (!kids.empty()) kids.pop_back();
-                MathNode::Type t;
-                if (lower) {
-                    t = MathNode::Sub;
-                } else {
-                    t = MathNode::Sup;
+                ws();
+                std::string g;
+                if (p < s.size() && s[p] == '{') {
+                    g = group();
+                } else if (p < s.size() && s[p] == '\\') {
+                    const size_t cs = p;
+                    ++p;
+                    while (p < s.size() && ((s[p] >= 'a' && s[p] <= 'z') || (s[p] >= 'A' && s[p] <= 'Z'))) ++p;
+                    g = s.substr(cs, p - cs);
+                } else if (p < s.size()) {
+                    g = std::string(1, s[p++]);
                 }
+                // base is the previous child (if Text with >1 char, split off the last UTF-8 char)
+                MathNode base{MathNode::Seq, {}, {}};
+                if (!kids.empty()) {
+                    if (kids.back().type == MathNode::Text && !kids.back().text.empty()) {
+                        std::string& bt = kids.back().text;
+                        size_t char_start = bt.size() - 1;
+                        while (char_start > 0 && (static_cast<unsigned char>(bt[char_start]) & 0xC0) == 0x80) {
+                            --char_start;
+                        }
+                        if (char_start > 0) {
+                            std::string last_ch = bt.substr(char_start);
+                            bt.erase(char_start);
+                            base = math_seq({math_text(last_ch)});
+                        } else {
+                            base = math_seq({std::move(kids.back())});
+                            kids.pop_back();
+                        }
+                    } else {
+                        base = std::move(kids.back());
+                        kids.pop_back();
+                        if (base.type != MathNode::Seq) {
+                            base = math_seq({std::move(base)});
+                        }
+                    }
+                }
+                MathNode::Type t = lower ? MathNode::Sub : MathNode::Sup;
                 MathNode n{t, {}, {}};
                 n.slots.push_back(std::move(base));
                 n.slots.push_back(math_from_latex(g));

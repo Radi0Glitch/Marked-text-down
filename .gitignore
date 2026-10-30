@@ -5,3 +5,4 @@ test/
 build-win*
 dist/
 tools/pandoc/
+tools/typst/

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Marked-text-down
+GenericName=Markdown Editor
+GenericName[ru]=Редактор Markdown
+Comment=Visual WYSIWYG Markdown editor with formulas, diagrams and charts
+Comment[ru]=Визуальный WYSIWYG-редактор Markdown с формулами, диаграммами и графиками
+Exec=marked-text-down %f
+Icon=marked-text-down
+Terminal=false
+Categories=Office;TextEditor;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;md;editor;formula;chart;
+StartupNotify=true

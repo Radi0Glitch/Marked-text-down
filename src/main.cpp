@@ -146,19 +146,72 @@ std::string find_pandoc_path() {
     return "";
 }
 
+std::string find_typst_path() {
+    std::vector<std::string> candidates;
+    if (const char* base = SDL_GetBasePath()) {
+        std::string dir(base);
+        candidates.push_back(dir + "tools/typst/linux-x86_64/typst");
+        candidates.push_back(dir + "tools/typst/windows-x86_64/typst.exe");
+        candidates.push_back(dir + "typst");
+        candidates.push_back(dir + "typst.exe");
+        candidates.push_back(dir + "../tools/typst/linux-x86_64/typst");
+        candidates.push_back(dir + "../tools/typst/windows-x86_64/typst.exe");
+    }
+#if defined(__linux__)
+    char buf[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        std::string exe(buf);
+        size_t slash = exe.find_last_of('/');
+        if (slash != std::string::npos) {
+            std::string dir = exe.substr(0, slash);
+            candidates.push_back(dir + "/tools/typst/linux-x86_64/typst");
+            candidates.push_back(dir + "/tools/typst/windows-x86_64/typst.exe");
+            candidates.push_back(dir + "/typst");
+            candidates.push_back(dir + "/typst.exe");
+        }
+    }
+#endif
+    candidates.push_back("tools/typst/linux-x86_64/typst");
+    candidates.push_back("tools/typst/windows-x86_64/typst.exe");
+    candidates.push_back("../tools/typst/linux-x86_64/typst");
+    candidates.push_back("../tools/typst/windows-x86_64/typst.exe");
+    candidates.push_back("typst");
+    candidates.push_back("typst.exe");
+    for (const auto& c : candidates) {
+        std::error_code ec;
+        if (c != "typst" && c != "typst.exe" && !std::filesystem::exists(std::filesystem::u8path(c), ec)) {
+            continue;
+        }
+#if defined(_WIN32)
+        std::string test = "\"" + c + "\" --version > nul 2>&1";
+#else
+        std::string test = "\"" + c + "\" --version > /dev/null 2>&1";
+#endif
+        if (std::system(test.c_str()) == 0) {
+            return c;
+        }
+    }
+    return "";
+}
+
 std::string find_fonts_dir() {
     std::vector<std::string> dirs;
     if (const char* base = SDL_GetBasePath()) {
         std::string b(base);
         dirs.push_back(b + "fonts");
         dirs.push_back(b + "../fonts");
+        dirs.push_back(b + "../share/marked-text-down/fonts");
     }
     dirs.push_back("fonts");
     dirs.push_back("../fonts");
+    dirs.push_back("/usr/share/marked-text-down/fonts");
+    dirs.push_back("/usr/local/share/marked-text-down/fonts");
     dirs.push_back(std::string(PROJECT_SOURCE_DIR) + "/fonts");
     for (const auto& d : dirs) {
         std::error_code ec;
-        if (std::filesystem::exists(d + "/FiraSans-Regular.ttf", ec)) {
+        if (std::filesystem::exists(std::filesystem::u8path(d + "/FiraSans-Regular.ttf"), ec)) {
             return d;
         }
     }
@@ -263,7 +316,11 @@ struct App {
     int tools_tab = 0;           // 0 = Главная, 1 = Таблица, 2 = Дополнения
     ui::Rect tab_rects[4]{};
     ui::Rect doc_viewport{};
+    ui::Rect scrollbar_track{};
+    ui::Rect scrollbar_thumb{};
     bool dragging = false;
+    bool scrollbar_dragging = false;
+    float scrollbar_drag_offset = 0.0f;
     bool doc_dirty = true;
     bool light_theme = false;
     float scroll_y = 0;
@@ -279,6 +336,10 @@ struct App {
     int height = 0;
     bool has_pandoc = false;
     std::string pandoc_path;
+    std::string typst_path;
+    std::string fonts_dir;
+    std::vector<std::string> pending_drops;
+    bool drop_gesture_active = false;
 
     bool gfm() const { return dialect == 1; }
     bool en() const { return ui_lang == 1; }
@@ -309,7 +370,7 @@ struct App {
 
     std::string document_name() const {
         return file_path.empty() ? tr("Без названия", "Untitled")
-                                 : std::filesystem::path(file_path).filename().string();
+                                 : std::filesystem::u8path(file_path).filename().u8string();
     }
 
     void toggle_theme() {
@@ -382,7 +443,7 @@ struct App {
         if (path.empty()) {
             path = dialogs::save_markdown("untitled.md");
             if (path.empty()) return false;
-            if (std::filesystem::path(path).extension().empty()) path += ".md";
+            if (std::filesystem::u8path(path).extension().empty()) path += ".md";
         }
         if (!md::write_text_file(path, md::export_markdown(doc, gfm()))) {
             dialogs::show_error(std::string(tr("Не удалось записать файл:\n", "Could not write file:\n")) + path);
@@ -414,35 +475,135 @@ struct App {
         return true;
     }
 
-    void open() {
-        if (!confirm_discard()) return;
-        const std::string path = dialogs::open_markdown();
-        if (path.empty()) return;
+    enum class OpenResult { Opened, Cancelled, Error };
 
+    static bool has_supported_markdown_ext(const std::string& path) {
+        std::string ext = std::filesystem::u8path(path).extension().u8string();
+        for (char& c : ext) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        return ext == ".md" || ext == ".markdown" || ext == ".txt";
+    }
+
+    OpenResult open_from_path(const std::string& path, bool from_external, bool show_dialogs = true) {
+        if (path.empty()) return OpenResult::Cancelled;
+
+        std::error_code ec;
+        const std::filesystem::path fspath = std::filesystem::u8path(path);
+        if (!std::filesystem::exists(fspath, ec) || std::filesystem::is_directory(fspath, ec)) {
+            const std::string msg = std::string(tr("Не удалось открыть файл:\n", "Could not open file:\n")) + path;
+            if (show_dialogs) dialogs::show_error(msg);
+            status = tr("Ошибка открытия файла", "Error opening file");
+            return OpenResult::Error;
+        }
+
+        // First verify the file is readable before asking to discard/save current work.
+        std::string preview_text;
+        if (!md::read_text_file(path, preview_text)) {
+            const std::string msg = std::string(tr("Не удалось открыть файл:\n", "Could not open file:\n")) + path;
+            if (show_dialogs) dialogs::show_error(msg);
+            status = tr("Ошибка чтения файла", "Error reading file");
+            return OpenResult::Error;
+        }
+
+        if (!confirm_discard()) {
+            return OpenResult::Cancelled;
+        }
+
+        // Re-read after confirm_discard() in case the user chose to save into the same file.
         std::string text;
         if (!md::read_text_file(path, text)) {
-            dialogs::show_error(std::string(tr("Не удалось открыть файл:\n", "Could not open file:\n")) + path);
-            return;
+            const std::string msg = std::string(tr("Не удалось открыть файл:\n", "Could not open file:\n")) + path;
+            if (show_dialogs) dialogs::show_error(msg);
+            status = tr("Ошибка чтения файла", "Error reading file");
+            return OpenResult::Error;
         }
+
         const int detected = md::looks_like_gfm(text) ? 1 : 0;
-        if (detected != dialect) {
-            dialect = detected;
+        const bool dialect_changed = (detected != dialect);
+        md::Document loaded;
+        md::import_markdown(text, detected == 1, loaded);
+
+        dialect = detected;
+        if (dialect_changed && show_dialogs && !from_external) {
             dialogs::show_info(tr("Диалект изменён", "Dialect changed"),
                                en() ? ("File uses dialect \"" + kDialects[dialect] + "\".\nDialect switched automatically.")
                                     : ("Файл записан в диалекте «" + kDialects[dialect] + "».\nДиалект переключён автоматически."));
         }
 
-        md::Document loaded;
-        md::import_markdown(text, gfm(), loaded);
         doc = std::move(loaded);
         editor.set_caret(md::Pos{0, 0, 0});
         scroll_y = 0;
         file_path = path;
         modified = false;
         doc_dirty = true;
+        formula_editor_open = false;
+        diag_editor_open = false;
+        chart_editor_open = false;
+        pandoc_help_open = false;
+        ui.open_popup.clear();
+        if (from_external) {
+            welcome_open = false;
+        }
         history.reset(doc, editor.caret(), editor.anchor());
         status = std::string(tr("Открыто: ", "Opened: ")) + document_name() + " (" + kDialects[dialect] + ")";
         update_title();
+        return OpenResult::Opened;
+    }
+
+    void open() {
+        const std::string path = dialogs::open_markdown();
+        if (path.empty()) return;
+        open_from_path(path, false, true);
+    }
+
+    bool export_with_pandoc(const std::string& to_fmt, const std::string& out_path) {
+        if (!has_pandoc || pandoc_path.empty()) return false;
+        std::string temp_dir;
+        if (char* pref = SDL_GetPrefPath("MarkedTextDown", "Editor")) {
+            temp_dir = pref;
+            SDL_free(pref);
+        }
+        const std::string tmp_in = temp_dir + "export_input_tmp.md";
+        const std::string md_text = md::export_markdown(doc, true);
+        if (!md::write_text_file(tmp_in, md_text)) {
+            return false;
+        }
+
+        std::string title = document_name();
+        if (title.empty()) title = "Document";
+        // Strip quotes from title to keep CLI clean
+        title.erase(std::remove(title.begin(), title.end(), '"'), title.end());
+
+        std::string cmd = "\"" + pandoc_path + "\" \"" + tmp_in + "\" -f gfm -t " + to_fmt
+                        + " --standalone --metadata title=\"" + title + "\"";
+        if (to_fmt == "pdf") {
+            if (!typst_path.empty()) {
+                cmd += " --pdf-engine=\"" + typst_path + "\""
+                     + " -V mainfont=\"Fira Sans\" -V monofont=\"Fira Mono\"";
+                if (!fonts_dir.empty()) {
+                    cmd += " --pdf-engine-opt=\"--font-path=" + fonts_dir + "\"";
+                }
+            }
+        }
+        cmd += " -o \"" + out_path + "\"";
+#if defined(_WIN32)
+        // Convert UTF-8 command to UTF-16 for _wsystem so Cyrillic paths and arguments work on Windows.
+        std::wstring wcmd;
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, cmd.c_str(), -1, nullptr, 0);
+        if (wlen > 0) {
+            wcmd.resize(static_cast<size_t>(wlen - 1));
+            MultiByteToWideChar(CP_UTF8, 0, cmd.c_str(), -1, &wcmd[0], wlen);
+        }
+        // _wsystem invokes cmd.exe /c which strips outer quotes if first and last chars are quotes.
+        std::wstring full_wcmd = L"\"" + wcmd + L"\"";
+        int rc = _wsystem(full_wcmd.c_str());
+#else
+        int rc = std::system(cmd.c_str());
+#endif
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(tmp_in), ec);
+        return rc == 0 && std::filesystem::exists(std::filesystem::u8path(out_path), ec);
     }
 
     bool init() {
@@ -484,7 +645,8 @@ struct App {
         SDL_StartTextInput(window);
         update_title();
 
-        if (!fontbook.init(find_fonts_dir())) {
+        fonts_dir = find_fonts_dir();
+        if (!fontbook.init(fonts_dir)) {
             std::fprintf(stderr, "Font load failed: %s\n", SDL_GetError());
             return false;
         }
@@ -504,6 +666,7 @@ struct App {
         if (!pandoc_path.empty()) {
             has_pandoc = true;
         }
+        typst_path = find_typst_path();
         history.reset(doc, editor.caret(), editor.anchor());
         editor.blink_tick = SDL_GetTicks();
 
@@ -766,13 +929,13 @@ struct App {
                 }
                 sep();
                 {
-                    struct Fmt { const char* label; const char* ext; const char* to; };
+                    struct Fmt { const char* label; const char* ext; const char* filter; const char* to; };
                     static const Fmt fmts[] = {
-                        {"DOCX", "document.docx", "docx"},
-                        {"PDF",  "document.pdf",  "pdf"},
-                        {"HTML", "document.html", "html5"},
-                        {"ODT",  "document.odt",  "odt"},
-                        {"EPUB", "document.epub", "epub"},
+                        {"DOCX", "document.docx", "*.docx", "docx"},
+                        {"PDF",  "document.pdf",  "*.pdf",  "pdf"},
+                        {"HTML", "document.html", "*.html", "html5"},
+                        {"ODT",  "document.odt",  "*.odt",  "odt"},
+                        {"EPUB", "document.epub", "*.epub", "epub"},
                     };
                     std::vector<std::string> items;
                     for (const auto& f : fmts) items.push_back(f.label);
@@ -781,27 +944,13 @@ struct App {
                     const int ch = !measuring ? ui::menu(ui, "pandoc_export_menu", r, lbl, items, 160.0f) : -1;
                     if (ch >= 0 && ch < (int)(sizeof(fmts)/sizeof(fmts[0]))) {
                         if (has_pandoc && !pandoc_path.empty()) {
-                            const std::string out = dialogs::save_markdown(fmts[ch].ext);
+                            std::string out = dialogs::save_export(fmts[ch].ext, fmts[ch].filter, fmts[ch].label);
                             if (!out.empty()) {
-                                std::string cmd = "\"" + pandoc_path + "\" -f gfm -t " + fmts[ch].to + " -o \"" + out + "\" -";
-#if defined(_WIN32)
-                                cmd = "\"" + cmd + "\"";
-                                FILE* p = _popen(cmd.c_str(), "wb");
-#else
-                                FILE* p = popen(cmd.c_str(), "w");
-#endif
-                                if (p) {
-                                    std::string md = md::export_markdown(doc, true);
-                                    fwrite(md.data(), 1, md.size(), p);
-#if defined(_WIN32)
-                                    int r = _pclose(p);
-#else
-                                    int r = pclose(p);
-#endif
-                                    if (r == 0) dialogs::show_info(tr("Экспорт", "Export"), tr("Файл экспортирован", "File exported"));
-                                    else dialogs::show_error(tr("Ошибка экспорта через Pandoc", "Pandoc export failed"));
+                                if (export_with_pandoc(fmts[ch].to, out)) {
+                                    dialogs::show_info(tr("Экспорт", "Export"), tr("Файл экспортирован", "File exported"));
+                                    status = std::string(tr("Экспортировано: ", "Exported: ")) + fmts[ch].label;
                                 } else {
-                                    dialogs::show_error(tr("Не удалось запустить Pandoc", "Could not start Pandoc"));
+                                    dialogs::show_error(tr("Ошибка экспорта через Pandoc", "Pandoc export failed"));
                                 }
                             }
                         } else {
@@ -1482,8 +1631,15 @@ void handle_key(const SDL_KeyboardEvent& key) {
                 viewport.h * viewport.h / (layout.content_height + 24.0f));
             const float thumb_y = viewport.y
                 + (viewport.h - thumb_h) * (scroll_y / max_scroll);
-            ui::fill_rounded_rect(ui, {area.x + area.w - 10.0f, thumb_y, 4.0f, thumb_h},
-                              2.0f, ui.palette.panel_border);
+            scrollbar_track = Rect{area.x + area.w - 16.0f, viewport.y, 14.0f, viewport.h};
+            scrollbar_thumb = Rect{area.x + area.w - 11.0f, thumb_y, 6.0f, thumb_h};
+            const bool sb_hover = scrollbar_dragging
+                || contains(scrollbar_track, ui.input.mouse_x, ui.input.mouse_y);
+            ui::fill_rounded_rect(ui, scrollbar_thumb, 3.0f,
+                                  sb_hover ? ui.palette.accent : ui.palette.panel_border);
+        } else {
+            scrollbar_track = Rect{};
+            scrollbar_thumb = Rect{};
         }
     }
 
@@ -1585,12 +1741,13 @@ void handle_key(const SDL_KeyboardEvent& key) {
             // splice: [before-text] [structure] [after-text] in place of the leaf
             std::vector<md::MathNode> repl;
             if (!before.empty()) repl.push_back(md::math_text(before));
-            const int node_idx = static_cast<int>(repl.size());
             repl.push_back(std::move(node));
             if (!after.empty()) repl.push_back(md::math_text(after));
             std::vector<md::MathNode> out;
+            int target_idx = slot_index;
             for (size_t i = 0; i < parent->slots.size(); ++i) {
                 if (static_cast<int>(i) == slot_index) {
+                    target_idx = static_cast<int>(out.size());
                     for (auto& r : repl) out.push_back(std::move(r));
                 } else {
                     out.push_back(std::move(parent->slots[i]));
@@ -1598,20 +1755,89 @@ void handle_key(const SDL_KeyboardEvent& key) {
             }
             parent->slots = std::move(out);
             std::vector<int> base = parent_path;
-            base.push_back(node_idx);
+            base.push_back(target_idx);
             formula_path.clear();
-            md::first_text_path(parent->slots[static_cast<size_t>(node_idx)], base,
+            md::first_text_path(parent->slots[static_cast<size_t>(target_idx)], base,
                                 formula_path);
             if (formula_path.empty()) formula_path = base;
         } else {
-            parent->slots[static_cast<size_t>(slot_index)] = std::move(node);
+            // Current slot is a direct child of a non-Seq structure (e.g. Matrix cell or Root):
+            // wrap the existing text and the new structure into a Seq so nothing is overwritten!
+            std::vector<md::MathNode> repl;
+            if (!before.empty()) repl.push_back(md::math_text(before));
+            const int node_idx = static_cast<int>(repl.size());
+            repl.push_back(std::move(node));
+            if (!after.empty()) repl.push_back(md::math_text(after));
+            parent->slots[static_cast<size_t>(slot_index)] = md::math_seq(std::move(repl));
             std::vector<int> base = parent_path;
             base.push_back(slot_index);
+            base.push_back(node_idx);
             formula_path.clear();
-            md::first_text_path(parent->slots[static_cast<size_t>(slot_index)], base,
-                                formula_path);
+            md::first_text_path(
+                parent->slots[static_cast<size_t>(slot_index)].slots[static_cast<size_t>(node_idx)],
+                base, formula_path);
             if (formula_path.empty()) formula_path = base;
         }
+        formula_off = 0;
+    }
+
+    // Insert a binary/relational operator as its own separated element and open a fresh slot after it.
+    void formula_insert_operator(const char* op) {
+        std::string op_str = std::string(" ") + op + " ";
+        md::MathNode* leaf = md::node_at_path(formula_edit, formula_path);
+        if (leaf && leaf->type == md::MathNode::Seq && leaf->slots.empty()) {
+            leaf->slots.push_back(md::math_text(op_str));
+            leaf->slots.push_back(md::math_text(""));
+            formula_path.push_back(1);
+            formula_off = 0;
+            return;
+        }
+        if (!leaf || leaf->type != md::MathNode::Text || formula_path.empty()) {
+            formula_edit.slots.push_back(md::math_text(op_str));
+            formula_edit.slots.push_back(md::math_text(""));
+            formula_path = {static_cast<int>(formula_edit.slots.size()) - 1};
+            formula_off = 0;
+            return;
+        }
+        const std::string before = leaf->text.substr(0, static_cast<size_t>(formula_off));
+        const std::string after = leaf->text.substr(static_cast<size_t>(formula_off));
+        std::vector<int> parent_path(formula_path.begin(), formula_path.end() - 1);
+        const int slot_index = formula_path.back();
+        md::MathNode* parent = md::node_at_path(formula_edit, parent_path);
+        if (!parent) return;
+        if (parent->type == md::MathNode::Seq) {
+            std::vector<md::MathNode> repl;
+            if (!before.empty()) repl.push_back(md::math_text(before));
+            repl.push_back(md::math_text(op_str));
+            const int after_idx = static_cast<int>(repl.size());
+            repl.push_back(md::math_text(after));
+            std::vector<md::MathNode> out;
+            int target_idx = slot_index;
+            for (size_t i = 0; i < parent->slots.size(); ++i) {
+                if (static_cast<int>(i) == slot_index) {
+                    target_idx = static_cast<int>(out.size()) + after_idx;
+                    for (auto& r : repl) out.push_back(std::move(r));
+                } else {
+                    out.push_back(std::move(parent->slots[i]));
+                }
+            }
+            parent->slots = std::move(out);
+            formula_path = parent_path;
+            formula_path.push_back(target_idx);
+            formula_off = 0;
+        } else {
+            leaf->text.insert(static_cast<size_t>(formula_off), op_str);
+            formula_off += static_cast<int>(op_str.size());
+        }
+    }
+
+    // Add a new empty block at the end of the current sequence (or root) so the user can continue the formula.
+    void formula_add_slot_after() {
+        if (formula_edit.type != md::MathNode::Seq) {
+            formula_edit = md::math_seq({std::move(formula_edit)});
+        }
+        formula_edit.slots.push_back(md::math_text(""));
+        formula_path = {static_cast<int>(formula_edit.slots.size()) - 1};
         formula_off = 0;
     }
 
@@ -1619,6 +1845,13 @@ void handle_key(const SDL_KeyboardEvent& key) {
     void formula_insert_symbol(const char* sym) {
         md::MathNode* leaf = md::node_at_path(formula_edit, formula_path);
         if (leaf && leaf->type == md::MathNode::Seq && leaf->slots.empty()) {
+            if (leaf == &formula_edit) {
+                // The root stays a Seq (structures depend on it): add a text child.
+                formula_edit.slots.push_back(md::math_text(sym));
+                formula_path = {0};
+                formula_off = static_cast<int>(std::string(sym).size());
+                return;
+            }
             // An empty slot row becomes a text run when the user types.
             leaf->type = md::MathNode::Text;
             leaf->text = sym;
@@ -1671,34 +1904,97 @@ void handle_key(const SDL_KeyboardEvent& key) {
         }
     }
 
-    // Delete the whole element (structure or symbol run) the caret sits in.
-    // This is how the user removes a structure inserted by accident.
+    // Delete the immediate element (structure or symbol run) the caret sits in,
+    // never wiping out the entire formula when editing inside a nested structure.
     void formula_delete_element() {
         if (formula_edit.type != md::MathNode::Seq) {
-            // Root itself is a single node; blank it out.
             formula_edit = md::math_seq({});
             formula_path = {};
             formula_off = 0;
             return;
         }
         if (formula_path.empty()) return;
-        const int top = formula_path[0];
-        if (top < 0 || static_cast<size_t>(top) >= formula_edit.slots.size()) return;
-        formula_edit.slots.erase(formula_edit.slots.begin() + top);
-        // Land the caret on the element that took the removed slot's place,
-        // or on the last one, or on the (now empty) root.
-        if (formula_edit.slots.empty()) {
-            formula_path = {};
+
+        // Find the innermost enclosing Seq (or structure) to remove just one block.
+        int seq_depth = -1;
+        int struct_depth = -1;
+        for (int d = static_cast<int>(formula_path.size()) - 1; d >= 0; --d) {
+            std::vector<int> sub(formula_path.begin(), formula_path.begin() + d);
+            const md::MathNode* n = md::node_at_path(formula_edit, sub);
+            if (!n) continue;
+            if (n->type == md::MathNode::Seq) {
+                if (n->slots.size() > 1 || d == 0) {
+                    seq_depth = d;
+                    break;
+                }
+            } else if (struct_depth < 0) {
+                struct_depth = d;
+            }
+        }
+
+        // If the caret is inside an single-element slot of a structure (like numerator of a fraction),
+        // and that slot has text, clear its text first; if already empty, remove the structure itself from its parent Seq.
+        if (seq_depth > 0) {
+            std::vector<int> seq_path(formula_path.begin(), formula_path.begin() + seq_depth);
+            const int child_idx = formula_path[static_cast<size_t>(seq_depth)];
+            md::MathNode* seq_node = md::node_at_path(formula_edit, seq_path);
+            if (seq_node && child_idx >= 0 && static_cast<size_t>(child_idx) < seq_node->slots.size()) {
+                seq_node->slots.erase(seq_node->slots.begin() + child_idx);
+                if (seq_node->slots.empty()) {
+                    formula_path = seq_path;
+                    formula_off = 0;
+                } else {
+                    const int land = std::min(child_idx, static_cast<int>(seq_node->slots.size()) - 1);
+                    std::vector<int> base = seq_path;
+                    base.push_back(land);
+                    formula_path.clear();
+                    md::first_text_path(seq_node->slots[static_cast<size_t>(land)], base, formula_path);
+                    if (formula_path.empty()) formula_path = base;
+                    const md::MathNode* leaf = md::node_at_path(formula_edit, formula_path);
+                    formula_off = leaf && leaf->type == md::MathNode::Text
+                                      ? static_cast<int>(leaf->text.size()) : 0;
+                }
+                return;
+            }
+        }
+
+        // If we are inside a structure slot that has only 1 element:
+        // if that leaf has text, clear it; if it's already empty, remove the enclosing structure from its parent Seq.
+        md::MathNode* leaf = md::node_at_path(formula_edit, formula_path);
+        if (formula_path.size() > 1 && leaf && leaf->type == md::MathNode::Text && !leaf->text.empty()) {
+            leaf->text.clear();
+            formula_off = 0;
+            return;
+        }
+
+        // Remove top-level or enclosing structure from its parent Seq.
+        int target_seq_depth = 0;
+        for (int d = static_cast<int>(formula_path.size()) - 2; d >= 0; --d) {
+            std::vector<int> sub(formula_path.begin(), formula_path.begin() + d);
+            const md::MathNode* n = md::node_at_path(formula_edit, sub);
+            if (n && n->type == md::MathNode::Seq) {
+                target_seq_depth = d;
+                break;
+            }
+        }
+        std::vector<int> ppath(formula_path.begin(), formula_path.begin() + target_seq_depth);
+        const int idx = formula_path[static_cast<size_t>(target_seq_depth)];
+        md::MathNode* pseq = md::node_at_path(formula_edit, ppath);
+        if (!pseq || idx < 0 || static_cast<size_t>(idx) >= pseq->slots.size()) return;
+        pseq->slots.erase(pseq->slots.begin() + idx);
+        if (pseq->slots.empty()) {
+            formula_path = ppath;
             formula_off = 0;
         } else {
-            const int land = std::min(top, static_cast<int>(formula_edit.slots.size()) - 1);
+            const int land = std::min(idx, static_cast<int>(pseq->slots.size()) - 1);
+            std::vector<int> base = ppath;
+            base.push_back(land);
             formula_path.clear();
-            md::first_text_path(formula_edit.slots[static_cast<size_t>(land)],
-                                {land}, formula_path);
-            if (formula_path.empty()) formula_path = {land};
-            const md::MathNode* leaf = md::node_at_path(formula_edit, formula_path);
-            formula_off = leaf && leaf->type == md::MathNode::Text
-                              ? static_cast<int>(leaf->text.size()) : 0;
+            md::first_text_path(pseq->slots[static_cast<size_t>(land)], base, formula_path);
+            if (formula_path.empty()) formula_path = base;
+            const md::MathNode* l = md::node_at_path(formula_edit, formula_path);
+            formula_off = l && l->type == md::MathNode::Text
+                              ? static_cast<int>(l->text.size()) : 0;
         }
     }
 
@@ -1752,7 +2048,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
         const float w = static_cast<float>(width);
         const float h = static_cast<float>(height);
         const float ow = w - 40.0f;
-        const float oh = std::min(430.0f, h - toolbar_h - 40.0f);
+        const float oh = std::min(460.0f, h - toolbar_h - 40.0f);
         const float ox = 20.0f;
         const float oy = toolbar_h + 20.0f;
         ui::fill_rounded_rect(ui, {ox, oy, ow, oh}, 10.0f, ui.palette.panel_bg);
@@ -1771,25 +2067,48 @@ void handle_key(const SDL_KeyboardEvent& key) {
             {"abs", "| |", "| |"}, {"matrix", "Матрица", "Matrix"}, {"cases", "Случ. ф.", "Cases"},
         };
         float tx = ox + 18.0f;
-        float ty = oy + 40.0f;
+        float ty = oy + 38.0f;
         for (const SBtn& s : structs) {
             const char* lbl = en() ? s.lbl_en : s.lbl_ru;
-            const float bw = text_width(fonts.regular, lbl) + 20.0f;
-            if (tx + bw > ox + ow - 18.0f) { tx = ox + 18.0f; ty += 34.0f; }
+            const float bw = text_width(fonts.regular, lbl) + 18.0f;
+            if (tx + bw > ox + ow - 18.0f) { tx = ox + 18.0f; ty += 32.0f; }
             if (button(ui, ("fbtn_" + std::string(s.id)).c_str(),
-                       {tx, ty, bw, 30.0f}, lbl)) {
+                       {tx, ty, bw, 28.0f}, lbl)) {
                 formula_insert_node(s.id);
             }
-            tx += bw + 6.0f;
+            tx += bw + 5.0f;
         }
-        ty += 36.0f;
+        {
+            const char* add_lbl = tr("+ блок", "+ slot");
+            const float bw = text_width(fonts.regular, add_lbl) + 18.0f;
+            if (tx + bw > ox + ow - 18.0f) { tx = ox + 18.0f; ty += 32.0f; }
+            if (button(ui, "fbtn_add_slot", {tx, ty, bw, 28.0f}, add_lbl)) {
+                formula_add_slot_after();
+            }
+        }
+        ty += 34.0f;
+
+        // --- operator buttons (split/create new blocks around operator) ---
+        static const char* ops[] = {
+            "+", "-", "=", "±", "×", "÷", "≠", "≤", "≥", "≈", "→",
+        };
+        tx = ox + 18.0f;
+        for (const char* op : ops) {
+            const float bw = text_width(fonts.regular, op) + 18.0f;
+            if (tx + bw > ox + ow - 18.0f) { tx = ox + 18.0f; ty += 30.0f; }
+            if (button(ui, ("fop_" + std::string(op)).c_str(),
+                       {tx, ty, bw, 26.0f}, op)) {
+                formula_insert_operator(op);
+            }
+            tx += bw + 5.0f;
+        }
+        ui::separator(ui, {tx + 2.0f, ty + 3.0f, 1.0f, 20.0f});
+        tx += 10.0f;
 
         // --- symbol buttons ---
         static const char* syms[] = {
-            "α","β","γ","δ","θ","λ","μ","π","σ","φ","ω",
-            "∞","±","×","÷","≠","≤","≥","≈","→","…",
+            "α","β","γ","δ","θ","λ","μ","π","σ","φ","ω","∞","…",
         };
-        tx = ox + 18.0f;
         for (const char* sym : syms) {
             const float bw = text_width(fonts.regular, sym) + 16.0f;
             if (tx + bw > ox + ow - 18.0f) { tx = ox + 18.0f; ty += 30.0f; }
@@ -1907,7 +2226,14 @@ void handle_key(const SDL_KeyboardEvent& key) {
         return true;
     }
 
+    static constexpr size_t kMaxChartRows = 12;
+
     void chart_add_row() {
+        if (chart_edit.labels.size() >= kMaxChartRows) {
+            status = tr("Достигнуто максимальное число рядов (12)",
+                        "Maximum number of rows reached (12)");
+            return;
+        }
         chart_edit.labels.push_back("");
         chart_edit.values.push_back("");
         chart_select(static_cast<int>(chart_edit.labels.size()) - 1, false);
@@ -2068,7 +2394,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
         row_button("ch_del", tr("Удалить ряд", "Delete Row"), true, [&]() { chart_delete_row(); });
         ty += 34.0f;
 
-        // --- chart canvas ---
+        // --- chart canvas (clipped so long labels/legends never bleed over buttons) ---
         const float canvas_h = std::max(80.0f, oh - (ty - oy) - 56.0f);
         const Rect canvas{ox + 18.0f, ty, ow - 36.0f, canvas_h};
         ui::fill_rect(ui, canvas, ui.palette.window_bg);
@@ -2083,13 +2409,17 @@ void handle_key(const SDL_KeyboardEvent& key) {
             }
         }
 
+        const SDL_Rect clip_rect{static_cast<int>(canvas.x + 1), static_cast<int>(canvas.y + 1),
+                                 static_cast<int>(canvas.w - 2), static_cast<int>(canvas.h - 20)};
+        SDL_SetRenderClipRect(ui.renderer, &clip_rect);
         chart_slots.clear();
         md::chartdraw::Selection sel;
         sel.index = chart_sel;
         sel.value = chart_sel_value;
         md::chartdraw::render(&ui, fontbook, chart_edit,
-                              canvas.x + 14.0f, canvas.y + 10.0f, canvas.w - 28.0f,
+                              canvas.x + 14.0f, canvas.y + 6.0f, canvas.w - 28.0f,
                               chart_sel >= 0 ? &sel : nullptr, &chart_slots);
+        SDL_SetRenderClipRect(ui.renderer, nullptr);
         ui::draw_text(ui, fonts.regular,
                   tr("Клик по категории/значению — выбор, ввод — текст, Tab — следующий, Delete — удалить/очистить ряд, Esc — закрыть",
                      "Click category/value to select, type to edit, Tab — next, Delete — remove/clear row, Esc — close"),
@@ -2357,7 +2687,13 @@ void handle_key(const SDL_KeyboardEvent& key) {
             case SDL_EVENT_MOUSE_MOTION:
                 ui.input.mouse_x = e.motion.x;
                 ui.input.mouse_y = e.motion.y;
-                if (dragging) {
+                if (scrollbar_dragging && max_scroll > 0.0f) {
+                    const float avail_h = scrollbar_track.h - scrollbar_thumb.h;
+                    if (avail_h > 1.0f) {
+                        const float ratio = (e.motion.y - scrollbar_track.y - scrollbar_drag_offset) / avail_h;
+                        scroll_y = std::clamp(ratio * max_scroll, 0.0f, max_scroll);
+                    }
+                } else if (dragging) {
                     editor_pointer(e.motion.x, e.motion.y, true);
                 }
                 break;
@@ -2388,6 +2724,24 @@ void handle_key(const SDL_KeyboardEvent& key) {
                             break;
                         }
                     }
+                    if (max_scroll > 0.0f && scrollbar_track.w > 0.0f
+                        && ui::contains(scrollbar_track, e.button.x, e.button.y)
+                        && !ui::pointer_over_popup(ui) && !formula_editor_open
+                        && !diag_editor_open && !chart_editor_open
+                        && !welcome_open && !pandoc_help_open) {
+                        scrollbar_dragging = true;
+                        if (ui::contains(scrollbar_thumb, e.button.x, e.button.y)) {
+                            scrollbar_drag_offset = e.button.y - scrollbar_thumb.y;
+                        } else {
+                            scrollbar_drag_offset = scrollbar_thumb.h / 2.0f;
+                            const float avail_h = scrollbar_track.h - scrollbar_thumb.h;
+                            if (avail_h > 1.0f) {
+                                const float ratio = (e.button.y - scrollbar_track.y - scrollbar_drag_offset) / avail_h;
+                                scroll_y = std::clamp(ratio * max_scroll, 0.0f, max_scroll);
+                            }
+                        }
+                        break;
+                    }
                     if (ui::contains(doc_viewport, e.button.x, e.button.y)
                         && !ui::pointer_over_popup(ui) && !formula_editor_open
                         && !diag_editor_open && !chart_editor_open
@@ -2399,6 +2753,31 @@ void handle_key(const SDL_KeyboardEvent& key) {
                             const auto& box = layout.boxes[i];
                             if (cy >= box.y && cy <= box.y + box.h) {
                                 hit = static_cast<int>(i);
+                                break;
+                            }
+                        }
+                        // Double-click below the last block (or at the bottom when the last block
+                        // is a code/formula/diagram/chart/table/rule block) appends a new paragraph
+                        // and moves the caret into it so the user is never trapped.
+                        if (e.button.clicks >= 2 && !doc.blocks.empty()) {
+                            const float doc_bottom = layout.boxes.empty()
+                                ? 0.0f
+                                : (layout.boxes.back().y + layout.boxes.back().h);
+                            const md::Block& last_blk = doc.blocks.back();
+                            const bool last_is_non_para = last_blk.type != md::BlockType::Paragraph;
+                            if (cy > doc_bottom - 4.0f || (hit == -1 && cy >= doc_bottom - 20.0f)
+                                || (last_is_non_para && cy >= doc_bottom - 12.0f)) {
+                                md::Block para;
+                                para.type = md::BlockType::Paragraph;
+                                para.inlines.push_back(md::Inline{"", 0, ""});
+                                doc.blocks.push_back(std::move(para));
+                                const int new_idx = static_cast<int>(doc.blocks.size()) - 1;
+                                editor.set_caret(md::Pos{new_idx, 0, 0, -1});
+                                mark_edited();
+                                md::layout_document(doc, fontbook, laid_out_width > 0.0f ? laid_out_width : 760.0f, layout);
+                                max_scroll = std::max(0.0f, layout.content_height - doc_viewport.h + 24.0f);
+                                ensure_caret_visible();
+                                dragging = false;
                                 break;
                             }
                         }
@@ -2506,6 +2885,49 @@ void handle_key(const SDL_KeyboardEvent& key) {
                         ui.input.released = true;
                     }
                     dragging = false;
+                    scrollbar_dragging = false;
+                }
+                break;
+            case SDL_EVENT_DROP_BEGIN:
+                pending_drops.clear();
+                drop_gesture_active = true;
+                break;
+            case SDL_EVENT_DROP_FILE:
+                if (e.drop.data != nullptr) {
+                    if (!drop_gesture_active) {
+                        // In case a backend emits DROP_FILE without DROP_BEGIN, process immediately
+                        std::string dropped(e.drop.data);
+                        if (!has_supported_markdown_ext(dropped)) {
+                            dialogs::show_error(tr("Поддерживаются только файлы .md, .markdown и .txt",
+                                                   "Only .md, .markdown, and .txt files are supported"));
+                        } else {
+                            open_from_path(dropped, true, true);
+                        }
+                    } else {
+                        pending_drops.emplace_back(e.drop.data);
+                    }
+                }
+                break;
+            case SDL_EVENT_DROP_COMPLETE:
+                if (drop_gesture_active) {
+                    drop_gesture_active = false;
+                    std::vector<std::string> files = std::move(pending_drops);
+                    pending_drops.clear();
+                    if (files.size() > 1) {
+                        dialogs::show_error(tr("Можно перетащить только один файл за раз",
+                                               "Please drop only one file at a time"));
+                        status = tr("Отклонено: несколько файлов", "Rejected: multiple files");
+                    } else if (files.size() == 1) {
+                        std::error_code ec;
+                        const std::filesystem::path fsp = std::filesystem::u8path(files[0]);
+                        if (std::filesystem::is_directory(fsp, ec) || !has_supported_markdown_ext(files[0])) {
+                            dialogs::show_error(tr("Поддерживаются только файлы .md, .markdown и .txt",
+                                                   "Only .md, .markdown, and .txt files are supported"));
+                            status = tr("Неподдерживаемый тип файла", "Unsupported file type");
+                        } else {
+                            open_from_path(files[0], true, true);
+                        }
+                    }
                 }
                 break;
             case SDL_EVENT_TEXT_INPUT:
@@ -3987,9 +4409,234 @@ int main(int argc, char** argv) {
             std::printf("selftest table ok: typing, Tab/Enter, rows, columns, pipes, click, lock\n");
         }
 
+        // Open-from-path, Drag & Drop, Chart editor slots/limits, Formula nested delete,
+        // Scrollbar drag, Double-click at document end, and Pandoc PDF/EPUB export.
+        {
+            const std::string fixtures_dir = std::string(PROJECT_SOURCE_DIR) + "/tests/fixtures/";
+            app.modified = false;
+
+            // 1. open_from_path: valid file, missing file, empty file
+            if (app.open_from_path(fixtures_dir + "gfm.md", true, false) != App::OpenResult::Opened
+                || app.dialect != 1 || app.welcome_open) {
+                std::fprintf(stderr, "selftest: open_from_path gfm.md failed\n");
+                app.shutdown();
+                return 1;
+            }
+            const std::string prev_path = app.file_path;
+            if (app.open_from_path(fixtures_dir + "does_not_exist.md", true, false) != App::OpenResult::Error
+                || app.file_path != prev_path || app.dialect != 1) {
+                std::fprintf(stderr, "selftest: open_from_path missing file corrupted state\n");
+                app.shutdown();
+                return 1;
+            }
+            const std::string empty_md = std::string(PROJECT_SOURCE_DIR) + "/build/empty_check.md";
+            md::write_text_file(empty_md, "");
+            if (app.open_from_path(empty_md, true, false) != App::OpenResult::Opened
+                || app.doc.blocks.empty()) {
+                std::fprintf(stderr, "selftest: open_from_path empty file failed\n");
+                app.shutdown();
+                return 1;
+            }
+
+            // 2. Drag & Drop: single valid file opens; multiple files and unsupported
+            // types are rejected without replacing the document.
+            {
+                const std::string basic_md = fixtures_dir + "basic.md";
+                SDL_Event eb{}; eb.type = SDL_EVENT_DROP_BEGIN;
+                app.dispatch(eb);
+                SDL_Event ef{}; ef.type = SDL_EVENT_DROP_FILE; ef.drop.data = basic_md.c_str();
+                app.dispatch(ef);
+                SDL_Event ec{}; ec.type = SDL_EVENT_DROP_COMPLETE;
+                app.dispatch(ec);
+                if (app.file_path != basic_md || app.welcome_open) {
+                    std::fprintf(stderr, "selftest: drag & drop single file failed\n");
+                    app.shutdown();
+                    return 1;
+                }
+                // Two files in one gesture: rejected as a whole, document kept.
+                const std::string prev_path2 = app.file_path;
+                SDL_Event eb2{}; eb2.type = SDL_EVENT_DROP_BEGIN;
+                app.dispatch(eb2);
+                SDL_Event e1{}; e1.type = SDL_EVENT_DROP_FILE; e1.drop.data = basic_md.c_str();
+                app.dispatch(e1);
+                const std::string other_md = fixtures_dir + "gfm.md";
+                SDL_Event e2{}; e2.type = SDL_EVENT_DROP_FILE; e2.drop.data = other_md.c_str();
+                app.dispatch(e2);
+                SDL_Event ec2{}; ec2.type = SDL_EVENT_DROP_COMPLETE;
+                app.dispatch(ec2);
+                if (app.file_path != prev_path2) {
+                    std::fprintf(stderr, "selftest: multi-file drop replaced document\n");
+                    app.shutdown();
+                    return 1;
+                }
+                // Unsupported extension: rejected, document kept.
+                SDL_Event eb3{}; eb3.type = SDL_EVENT_DROP_BEGIN;
+                app.dispatch(eb3);
+                const std::string png = fixtures_dir + "not_a_markdown.png";
+                SDL_Event e3{}; e3.type = SDL_EVENT_DROP_FILE; e3.drop.data = png.c_str();
+                app.dispatch(e3);
+                SDL_Event ec3{}; ec3.type = SDL_EVENT_DROP_COMPLETE;
+                app.dispatch(ec3);
+                if (app.file_path != prev_path2) {
+                    std::fprintf(stderr, "selftest: unsupported drop replaced document\n");
+                    app.shutdown();
+                    return 1;
+                }
+                // A new gesture after rejections must still open files.
+                SDL_Event eb4{}; eb4.type = SDL_EVENT_DROP_BEGIN;
+                app.dispatch(eb4);
+                SDL_Event e4{}; e4.type = SDL_EVENT_DROP_FILE; e4.drop.data = other_md.c_str();
+                app.dispatch(e4);
+                SDL_Event ec4{}; ec4.type = SDL_EVENT_DROP_COMPLETE;
+                app.dispatch(ec4);
+                if (app.file_path != other_md) {
+                    std::fprintf(stderr, "selftest: drop after rejections failed\n");
+                    app.shutdown();
+                    return 1;
+                }
+            }
+
+            // 3. Chart editor: slots selectable when 0/empty, row cap at 12
+            {
+                app.chart_open_new();
+                app.frame();
+                for (int i = 0; i < 4; ++i) app.chart_add_row();
+                app.chart_select(1, true); // value cell of an empty row
+                app.frame();
+                if (app.chart_slots.size() < 10 || app.chart_sel < 0 || !app.chart_sel_value) {
+                    std::fprintf(stderr, "selftest: chart slots missing (%zu, sel=%d val=%d)\n",
+                                 app.chart_slots.size(), app.chart_sel,
+                                 app.chart_sel_value ? 1 : 0);
+                    app.shutdown();
+                    return 1;
+                }
+                for (int i = 0; i < 20; ++i) app.chart_add_row();
+                if (app.chart_edit.labels.size() > App::kMaxChartRows) {
+                    std::fprintf(stderr, "selftest: chart row limit not enforced (%zu)\n",
+                                 app.chart_edit.labels.size());
+                    app.shutdown();
+                    return 1;
+                }
+                app.chart_apply();
+                app.frame();
+            }
+
+            // 4. Formula editor: operator split & nested delete keeps outer formula intact
+            {
+                app.formula_open_new();
+                app.frame();
+                app.formula_insert_symbol("a");
+                app.formula_insert_operator("+");
+                app.formula_insert_node("frac");
+                app.frame();
+                app.formula_insert_symbol("x");
+                app.frame();
+                // First delete clears "x" inside numerator without deleting "a +" or the fraction
+                app.formula_delete_element();
+                app.frame();
+                if (app.formula_edit.slots.size() < 3) {
+                    std::fprintf(stderr, "selftest: formula delete wiped whole formula (%zu)\n",
+                                 app.formula_edit.slots.size());
+                    app.shutdown();
+                    return 1;
+                }
+                // Second delete on empty numerator removes the fraction, keeping "a +"
+                app.formula_delete_element();
+                app.frame();
+                if (app.formula_edit.slots.size() < 2) {
+                    std::fprintf(stderr, "selftest: formula structure delete wiped siblings (%zu)\n",
+                                 app.formula_edit.slots.size());
+                    app.shutdown();
+                    return 1;
+                }
+                app.formula_editor_open = false;
+            }
+
+            // 5. Double-click at the bottom when last block is a chart/code block creates a new paragraph
+            {
+                const size_t before_blocks = app.doc.blocks.size();
+                app.scroll_y = app.max_scroll;
+                app.frame();
+                const float click_x = app.doc_viewport.x + 40.0f;
+                const float click_y = app.doc_viewport.y + app.doc_viewport.h - 4.0f;
+                SDL_Event md{};
+                md.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+                md.button.button = SDL_BUTTON_LEFT;
+                md.button.x = click_x;
+                md.button.y = click_y;
+                md.button.clicks = 2;
+                app.dispatch(md);
+                SDL_Event mu{};
+                mu.type = SDL_EVENT_MOUSE_BUTTON_UP;
+                mu.button.button = SDL_BUTTON_LEFT;
+                mu.button.x = click_x;
+                mu.button.y = click_y;
+                app.dispatch(mu);
+                app.frame();
+                if (app.doc.blocks.size() != before_blocks + 1
+                    || app.doc.blocks.back().type != md::BlockType::Paragraph
+                    || app.editor.caret().block != static_cast<int>(app.doc.blocks.size()) - 1) {
+                    std::fprintf(stderr, "selftest: double-click at document end did not create paragraph\n");
+                    app.shutdown();
+                    return 1;
+                }
+            }
+
+            // 6. Export EPUB and PDF via Pandoc (+ Typst) if available
+            if (app.has_pandoc) {
+                const std::string epub_out = std::string(PROJECT_SOURCE_DIR) + "/build/selftest_out.epub";
+                if (!app.export_with_pandoc("epub", epub_out)) {
+                    std::fprintf(stderr, "selftest: EPUB export failed\n");
+                    app.shutdown();
+                    return 1;
+                }
+                if (!app.typst_path.empty()) {
+                    const std::string pdf_out = std::string(PROJECT_SOURCE_DIR) + "/build/selftest_out.pdf";
+                    if (!app.export_with_pandoc("pdf", pdf_out)) {
+                        std::fprintf(stderr, "selftest: PDF export with Typst failed\n");
+                        app.shutdown();
+                        return 1;
+                    }
+                }
+                std::printf("selftest pandoc export ok: EPUB%s\n",
+                            app.typst_path.empty() ? "" : " + PDF (Typst)");
+            }
+
+            std::printf("selftest v1.0.1 fixes ok: open_from_path, drop, chart, formula, dblclick\n");
+        }
+
         std::printf("selftest edit ok: insert/split/merge/select/delete/roundtrip\n");
         app.shutdown();
         return 0;
+    }
+
+    // Handle CLI arguments for normal launch:
+    // Accept at most one positional file path to open on startup.
+    if (argc > 1) {
+        std::vector<std::string> positional;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i] ? argv[i] : "";
+            if (arg.empty()) continue;
+            if (arg.rfind("-", 0) == 0) {
+                dialogs::show_error(std::string(app.tr("Неизвестный параметр запуска:\n",
+                                                       "Unknown command-line option:\n")) + arg);
+                app.shutdown();
+                return 2;
+            }
+            positional.push_back(arg);
+        }
+        if (positional.size() > 1) {
+            dialogs::show_error(app.tr("Укажите только один файл для открытия при запуске.",
+                                       "Please specify only one file to open on startup."));
+            app.shutdown();
+            return 2;
+        }
+        if (positional.size() == 1) {
+            if (app.open_from_path(positional[0], true, true) != App::OpenResult::Opened) {
+                app.shutdown();
+                return 1;
+            }
+        }
     }
 
     bool running = true;

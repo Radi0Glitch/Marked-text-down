@@ -1,0 +1,36 @@
+# Maintainer: Radi0Glitch <radioglitch at github>
+
+pkgname=marked-text-down-git
+pkgver=r1.0.1
+pkgrel=1
+pkgdesc="Lightweight cross-platform visual (WYSIWYG) Markdown editor with formulas, diagrams and charts"
+arch=('x86_64')
+url="https://github.com/Radi0Glitch/Marked-text-down"
+license=('MIT')
+depends=('sdl3' 'sdl3_ttf')
+makedepends=('git' 'meson' 'ninja')
+optdepends=(
+  'pandoc: export to DOCX/PDF/HTML/ODT/EPUB'
+  'typst: PDF export engine used by Pandoc'
+)
+provides=('marked-text-down')
+conflicts=('marked-text-down')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$pkgname"
+  arch-meson build
+  meson compile -C build
+}
+
+package() {
+  cd "$pkgname"
+  meson install -C build --destdir "$pkgdir"
+  install -Dm644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
+}

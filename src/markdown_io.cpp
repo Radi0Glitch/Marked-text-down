@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <utility>
@@ -1024,7 +1025,12 @@ bool looks_like_gfm(const std::string& source) {
 }
 
 bool read_text_file(const std::string& path, std::string& out) {
-    std::ifstream in(path, std::ios::binary);
+    std::error_code ec;
+    const std::filesystem::path fspath = std::filesystem::u8path(path);
+    if (!std::filesystem::exists(fspath, ec) || std::filesystem::is_directory(fspath, ec)) {
+        return false;
+    }
+    std::ifstream in(fspath, std::ios::binary);
     if (!in) return false;
     std::ostringstream buf;
     buf << in.rdbuf();
@@ -1033,7 +1039,8 @@ bool read_text_file(const std::string& path, std::string& out) {
 }
 
 bool write_text_file(const std::string& path, const std::string& text) {
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    const std::filesystem::path fspath = std::filesystem::u8path(path);
+    std::ofstream file(fspath, std::ios::binary | std::ios::trunc);
     if (!file) return false;
     file.write(text.data(), static_cast<std::streamsize>(text.size()));
     return static_cast<bool>(file);

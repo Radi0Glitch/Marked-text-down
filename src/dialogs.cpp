@@ -18,6 +18,14 @@ std::string save_markdown(const std::string& suggested_name) {
     return path ? path : "";
 }
 
+std::string save_export(const std::string& suggested_name, const std::string& filter_pattern,
+                        const std::string& filter_desc) {
+    char const* filters[] = {filter_pattern.c_str()};
+    const char* path = tinyfd_saveFileDialog("Экспорт документа", suggested_name.c_str(), 1,
+                                             filters, filter_desc.c_str());
+    return path ? path : "";
+}
+
 int ask_save_changes(const std::string& document_name) {
     const std::string message = "В документе «" + document_name
         + "» есть несохранённые изменения.\n\nСохранить их?";

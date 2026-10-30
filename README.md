@@ -23,12 +23,19 @@
   - Поддержка **CommonMark** и **GitHub Flavored Markdown** с автоматическим распознаванием диалекта при открытии файла.
 - **Экспорт через Pandoc**:
   - Встроенная поддержка экспорта документа в **DOCX**, **PDF**, **HTML**, **ODT** и **EPUB** в один клик + справочная таблица совместимости расширений с популярными платформами (GitHub, GitLab, Notion, Obsidian, Reddit).
+  - Экспорт в PDF выполняется лёгким векторным движком **Typst** (входит в состав сборки наравне с Pandoc, шрифты подхватываются из пакета) — не требует LaTeX.
+- **Работа с файлами**:
+  - Открытие файла аргументом командной строки: `marked-text-down document.md`.
+  - Перетаскивание (drag & drop) `.md`-файла в окно редактора.
+  - На Windows установщик регистрирует ассоциации `.md` / `.markdown` (правый клик → «Открыть в Marked-text-down»), на Linux ставится `.desktop`-файл.
+  - Пути с кириллицей и любыми не-ASCII символами поддерживаются на обеих платформах.
 - **Удобный интерфейс для пользователя**:
   - Переключение **Тёмной** и **Светлой** темы оформления.
   - Переключение языка интерфейса (**Русский / English**).
   - Стартовое окно обзора возможностей (`F1` или кнопка `?`) с запоминанием настроек между запусками.
   - Полноценная история изменений (**Undo / Redo** — `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z`).
-  
+  - Перетаскивание полосы прокрутки, двойной клик в пустой зоне под документом добавляет абзац.
+
   ![скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image.png)
   ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(2).png)
   ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(7).png)
@@ -71,6 +78,19 @@ sudo pacman -S sdl3 sdl3_ttf meson ninja zenity
 meson setup build --buildtype=release
 ninja -C build
 ./build/marked-text-down
+```
+
+Установка в систему (бинарник, шрифты, `.desktop`-файл и иконка):
+
+```sh
+sudo ninja -C build install
+```
+
+### Сборка пакета для Arch Linux (AUR)
+
+```sh
+cd packaging/aur
+makepkg -si            # собирает marked-text-down-git и устанавливает
 ```
 
 ---
