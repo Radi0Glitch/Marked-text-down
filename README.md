@@ -1,4 +1,4 @@
- ![скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image.png)
+ ![Иконка](https://github.com/Radi0Glitch/Marked-text-down/blob/main/packaging/icons/mtd-logo-128.png)
  # Marked-text-down
 
 Лёгкий кроссплатформенный визуальный (WYSIWYG) редактор Markdown. Вы работаете с живым отформатированным текстом и визуальными блоками без служебной разметки на экране, а на диске сохраняется чистый стандартный `.md`-файл.
