@@ -33,6 +33,12 @@ int ask_save_changes(const std::string& document_name) {
                              "yesnocancel", "question", 1);
 }
 
+bool ask_restore_autosave() {
+    return tinyfd_messageBox("Восстановление",
+                             "Найдена несохранённая копия документа.\n\nВосстановить её?",
+                             "yesno", "question", 1) == 1;
+}
+
 void show_error(const std::string& message) {
     tinyfd_messageBox("Marked-text-down", message.c_str(), "ok", "error", 1);
 }

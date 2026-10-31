@@ -106,7 +106,8 @@ void render_document(ui::Context& ctx, const Document& doc, const Layout& layout
                 for (const Inline& inl : block.inlines) tex += inl.text;
                 const MathNode node = math_from_latex(tex);
                 mathdraw::render(&ctx, fonts, node,
-                                 origin_x + box.x + 14.0f, by + 10.0f, 18.0f,
+                                 origin_x + box.x + 14.0f, by + 10.0f,
+                                 18.0f * fonts.zoom(),
                                  nullptr, nullptr);
             } else if (is_diagram && is_chart) {
                 chartdraw::render_block(&ctx, fonts, draw_code,

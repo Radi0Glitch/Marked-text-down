@@ -18,6 +18,7 @@ sources = files(
   'src/editor.cpp',
   'src/history.cpp',
   'src/markdown_io.cpp',
+  'src/search.cpp',
   'src/dialogs.cpp',
   'src/math_model.cpp',
   'src/math_draw.cpp',

@@ -90,6 +90,7 @@ static const PTemplate kChartTemplates[] = {
 #include "math_draw.hpp"
 #include "math_model.hpp"
 #include "render.hpp"
+#include "search.hpp"
 #include "ui.hpp"
 
 #include <filesystem>
@@ -229,6 +230,7 @@ const std::vector<std::string> kFileItemsRu = {
     "Сохранить   Ctrl+S",
     "Сохранить как...   Ctrl+Shift+S",
     "О редакторе и возможностях",
+    "Оглавление   Ctrl+Shift+T",
 };
 
 const std::vector<std::string> kFileItemsEn = {
@@ -237,16 +239,30 @@ const std::vector<std::string> kFileItemsEn = {
     "Save   Ctrl+S",
     "Save As...   Ctrl+Shift+S",
     "Welcome & Features",
+    "Outline   Ctrl+Shift+T",
 };
 
-std::string settings_file_path() {
+std::string data_file(const std::string& name) {
     char* pref = SDL_GetPrefPath("MarkedTextDown", "Editor");
     if (pref) {
-        std::string p = std::string(pref) + "settings.cfg";
+        std::string p = std::string(pref) + name;
         SDL_free(pref);
         return p;
     }
-    return "marked_text_down_settings.cfg";
+    return "marked_text_down_" + name;
+}
+
+std::string settings_file_path() {
+    return data_file("settings.cfg");
+}
+
+// Unsaved work is kept here between runs until it is saved or discarded.
+std::string autosave_file_path() {
+    return data_file("autosave.md");
+}
+
+std::string autosave_meta_path() {
+    return data_file("autosave.cfg");
 }
 
 // Cuts `text` with an ellipsis so it fits in `max_w`, never splitting a UTF-8 character.
@@ -325,7 +341,43 @@ struct App {
     bool light_theme = false;
     float scroll_y = 0;
     float laid_out_width = -1;
+    float laid_out_zoom = -1; // zoom that `layout` was built with
+    float zoom = 1.0f;        // document zoom, 0.5 … 2.0
     float max_scroll = 0;
+
+    // Pending zoom anchor: the document point that should stay under the
+    // cursor after the next relayout. Negative when no anchor is armed.
+    float zoom_anchor_doc_y = -1.0f;    // document y under the cursor (old zoom)
+    float zoom_anchor_view_y = 0.0f;    // cursor offset from viewport top
+    float zoom_anchor_old_zoom = 1.0f;  // zoom the anchor was captured at
+
+    // Find and replace bar (Ctrl+F / Ctrl+H).
+    bool find_open = false;
+    bool find_focus = false;      // keyboard input goes to the bar
+    bool find_replace_mode = false;
+    int find_field = 0;           // 0 = search text, 1 = replacement text
+    std::string find_query;
+    std::string find_replacement;
+    std::vector<md::Match> find_matches;
+    int find_current = -1;
+    ui::Rect find_bar_rect{};
+    ui::Rect find_field_rect[2]{}; // search and replacement fields, set by draw
+
+    // Outline sidebar (Ctrl+Shift+T): clickable headings, row rect + block index.
+    bool outline_open = false;
+    static constexpr float kOutlineW = 220.0f;
+    std::vector<std::pair<ui::Rect, int>> outline_rows;
+
+    // Recent files, newest first.
+    std::vector<std::string> recent_files;
+
+    // Refreshed together with the layout.
+    std::size_t word_count = 0;
+
+    // Autosave: the serial counts edits, so unchanged text is not written again.
+    unsigned edit_serial = 0;
+    unsigned autosaved_serial = 0;
+    Uint64 last_autosave_ms = 0;
 
     std::string file_path; // empty until the document is opened or saved
     bool modified = false; // unsaved changes
@@ -350,6 +402,7 @@ struct App {
         content += "show_welcome=" + std::string(show_welcome_on_startup ? "1" : "0") + "\n";
         content += "lang=" + std::string(ui_lang == 1 ? "en" : "ru") + "\n";
         content += "theme=" + std::string(light_theme ? "light" : "dark") + "\n";
+        for (const std::string& path : recent_files) content += "recent=" + path + "\n";
         md::write_text_file(settings_file_path(), content);
     }
 
@@ -365,7 +418,22 @@ struct App {
             else if (line == "lang=ru") ui_lang = 0;
             else if (line == "theme=light") light_theme = true;
             else if (line == "theme=dark") light_theme = false;
+            else if (line.rfind("recent=", 0) == 0 && recent_files.size() < kMaxRecent) {
+                recent_files.push_back(line.substr(7));
+            }
         }
+    }
+
+    static constexpr size_t kMaxRecent = 8;
+    bool selftest_mode = false; // keeps test runs away from the user's files
+
+    void add_recent(const std::string& path) {
+        if (path.empty() || selftest_mode) return;
+        recent_files.erase(std::remove(recent_files.begin(), recent_files.end(), path),
+                           recent_files.end());
+        recent_files.insert(recent_files.begin(), path);
+        if (recent_files.size() > kMaxRecent) recent_files.resize(kMaxRecent);
+        save_settings();
     }
 
     std::string document_name() const {
@@ -395,6 +463,7 @@ struct App {
 
     void mark_edited() {
         doc_dirty = true;
+        ++edit_serial;
         if (!modified) {
             modified = true;
             update_title();
@@ -451,9 +520,67 @@ struct App {
         }
         file_path = path;
         modified = false;
+        remove_autosave();
+        add_recent(path);
         status = std::string(tr("Сохранено: ", "Saved: ")) + document_name();
         update_title();
         return true;
+    }
+
+    // Writes the unsaved text to the autosave file, at most every 15 seconds
+    // and only when something changed since the last copy.
+    void autosave_tick() {
+        if (!modified || edit_serial == autosaved_serial) return;
+        const Uint64 now = SDL_GetTicks();
+        if (now - last_autosave_ms < 15000) return;
+        last_autosave_ms = now;
+        const std::string meta = "path=" + file_path + "\ndialect=" + std::to_string(dialect) + "\n";
+        if (md::write_text_file(autosave_file_path(), md::export_markdown(doc, gfm()))
+            && md::write_text_file(autosave_meta_path(), meta)) {
+            autosaved_serial = edit_serial;
+        }
+    }
+
+    void remove_autosave() {
+        if (selftest_mode) return;
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(autosave_file_path()), ec);
+        std::filesystem::remove(std::filesystem::u8path(autosave_meta_path()), ec);
+    }
+
+    // Called once at startup: brings back the copy left by an unfinished session.
+    void offer_recovery() {
+        std::string text;
+        if (!md::read_text_file(autosave_file_path(), text)) return;
+        if (!dialogs::ask_restore_autosave()) {
+            remove_autosave();
+            return;
+        }
+        std::string meta;
+        std::string path;
+        int saved_dialect = 0;
+        if (md::read_text_file(autosave_meta_path(), meta)) {
+            std::istringstream iss(meta);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (line.rfind("path=", 0) == 0) path = line.substr(5);
+                else if (line == "dialect=1") saved_dialect = 1;
+            }
+        }
+        dialect = saved_dialect;
+        md::Document loaded;
+        md::import_markdown(text, gfm(), loaded);
+        doc = std::move(loaded);
+        editor.set_caret(md::Pos{0, 0, 0});
+        scroll_y = 0;
+        file_path = path;
+        modified = true;
+        doc_dirty = true;
+        ++edit_serial;
+        autosaved_serial = edit_serial;
+        history.reset(doc, editor.caret(), editor.anchor());
+        status = tr("Восстановлена несохранённая копия", "Unsaved copy restored");
+        update_title();
     }
 
     bool save_as() {
@@ -472,6 +599,7 @@ struct App {
         const int answer = dialogs::ask_save_changes(document_name());
         if (answer == 0) return false;
         if (answer == 1) return save();
+        remove_autosave();
         return true;
     }
 
@@ -546,6 +674,9 @@ struct App {
             welcome_open = false;
         }
         history.reset(doc, editor.caret(), editor.anchor());
+        add_recent(path);
+        find_matches.clear();
+        find_current = -1;
         status = std::string(tr("Открыто: ", "Opened: ")) + document_name() + " (" + kDialects[dialect] + ")";
         update_title();
         return OpenResult::Opened;
@@ -1070,13 +1201,25 @@ struct App {
         const char* file_lbl = tr("Файл", "File");
         file_rect = Rect{pad, y, std::max(34.0f, text_width(fonts.regular, file_lbl) + 28.0f), h};
 
-        const int choice = menu(ui, "file", file_rect, file_lbl,
-                                en() ? kFileItemsEn : kFileItemsRu, 270.0f);
+        std::vector<std::string> file_items = en() ? kFileItemsEn : kFileItemsRu;
+        for (const std::string& path : recent_files) {
+            file_items.push_back("   " + std::filesystem::u8path(path).filename().u8string());
+        }
+        const int choice = menu(ui, "file", file_rect, file_lbl, file_items, 270.0f);
         if (choice == 0) new_document();
         if (choice == 1) open();
         if (choice == 2) save();
         if (choice == 3) save_as();
         if (choice == 4) welcome_open = true;
+        if (choice == 5) toggle_outline();
+        if (choice >= 6 && choice - 6 < static_cast<int>(recent_files.size())) {
+            const std::string path = recent_files[static_cast<size_t>(choice - 6)];
+            if (open_from_path(path, false, true) == OpenResult::Error) {
+                recent_files.erase(std::remove(recent_files.begin(), recent_files.end(), path),
+                                   recent_files.end());
+                save_settings();
+            }
+        }
 
         if (button(ui, "theme_btn", theme_rect, theme_label)) {
             toggle_theme();
@@ -1547,6 +1690,15 @@ void handle_key(const SDL_KeyboardEvent& key) {
             case SDLK_Q:
                 if (ctrl && shift) { editor.set_block(md::BlockType::Quote); mark_edited(); }
                 break;
+            case SDLK_F:
+                if (ctrl) open_find(false);
+                break;
+            case SDLK_H:
+                if (ctrl) open_find(true);
+                break;
+            case SDLK_T:
+                if (ctrl && shift) toggle_outline();
+                break;
             case SDLK_R:
                 if (ctrl && shift) { editor.insert_rule(); mark_edited(); }
                 break;
@@ -1572,10 +1724,324 @@ void handle_key(const SDL_KeyboardEvent& key) {
         }
     }
 
+    // Changes the document zoom, arming an anchor so the document point under
+    // the cursor stays put after the relayout.
+    void zoom_to(float new_zoom, float cursor_y) {
+        new_zoom = std::clamp(new_zoom, 0.5f, 2.0f);
+        if (new_zoom == zoom) return;
+        if (doc_viewport.h > 0.0f
+            && cursor_y >= doc_viewport.y && cursor_y <= doc_viewport.y + doc_viewport.h) {
+            zoom_anchor_doc_y = scroll_y + (cursor_y - doc_viewport.y);
+            zoom_anchor_view_y = cursor_y - doc_viewport.y;
+            zoom_anchor_old_zoom = zoom;
+        } else {
+            zoom_anchor_doc_y = -1.0f;
+        }
+        zoom = new_zoom;
+        fontbook.set_zoom(zoom);
+        doc_dirty = true; // force a relayout with the new zoom
+    }
+
     void editor_pointer(float x, float y, bool extend) {
+        find_focus = false;
         editor.click(layout, fontbook, x - doc_viewport.x,
                      y - doc_viewport.y + scroll_y, extend);
         ensure_caret_visible();
+    }
+
+    // ---------- find and replace ----------
+
+    std::string& find_text() { return find_field == 0 ? find_query : find_replacement; }
+
+    void open_find(bool replace) {
+        if (editor.has_selection()) {
+            const std::string sel = editor.selected_text();
+            if (!sel.empty() && sel.find('\n') == std::string::npos) find_query = sel;
+        }
+        find_open = true;
+        find_focus = true;
+        find_replace_mode = replace;
+        find_field = 0;
+        find_query_changed();
+    }
+
+    void close_find() {
+        find_open = false;
+        find_focus = false;
+        find_matches.clear();
+        find_current = -1;
+    }
+
+    // Recomputes the matches and selects the first one at or after the start
+    // of the selection, so the search follows what is being typed.
+    void find_query_changed() {
+        find_matches = md::find_all(doc, find_query);
+        find_current = -1;
+        const md::Pos from = editor.has_selection() ? editor.selection().first : editor.caret();
+        for (int i = 0; i < static_cast<int>(find_matches.size()); ++i) {
+            if (!(find_matches[i].begin < from)) {
+                find_current = i;
+                break;
+            }
+        }
+        if (find_current < 0 && !find_matches.empty()) find_current = 0;
+        if (find_current >= 0) find_select(find_current);
+    }
+
+    // Keeps the match list valid after the text changed.
+    void find_sync() {
+        find_matches = md::find_all(doc, find_query);
+        const int n = static_cast<int>(find_matches.size());
+        if (find_current >= n) find_current = n - 1;
+    }
+
+    void find_select(int index) {
+        find_current = index;
+        const md::Match& m = find_matches[static_cast<size_t>(index)];
+        editor.set_caret(m.begin);
+        editor.set_caret(m.end, true);
+        ensure_caret_visible();
+    }
+
+    void find_step(bool forward) {
+        find_sync();
+        const int n = static_cast<int>(find_matches.size());
+        if (n == 0) {
+            status = tr("Совпадений нет", "No matches");
+            return;
+        }
+        const int cur = std::min(find_current, n - 1);
+        int next = 0;
+        if (cur < 0) {
+            next = forward ? 0 : n - 1;
+        } else {
+            next = forward ? (cur + 1) % n : (cur - 1 + n) % n;
+        }
+        find_select(next);
+    }
+
+    // With the current match selected, replaces it and selects the next one.
+    // Otherwise only selects the match.
+    void find_replace_current() {
+        find_sync();
+        if (find_matches.empty()) {
+            status = tr("Совпадений нет", "No matches");
+            return;
+        }
+        bool on_match = false;
+        if (editor.has_selection() && find_current >= 0) {
+            const auto [s, e] = editor.selection();
+            const md::Match& m = find_matches[static_cast<size_t>(find_current)];
+            on_match = m.begin == s && m.end == e;
+        }
+        if (!on_match) {
+            find_query_changed();
+            return;
+        }
+        editor.insert_text(find_replacement);
+        mark_edited();
+        find_query_changed();
+    }
+
+    void find_replace_all() {
+        const std::vector<md::Match> matches = md::find_all(doc, find_query);
+        if (matches.empty()) {
+            status = tr("Совпадений нет", "No matches");
+            return;
+        }
+        // Back to front, so earlier positions stay valid.
+        for (auto it = matches.rbegin(); it != matches.rend(); ++it) {
+            editor.set_caret(it->begin);
+            editor.set_caret(it->end, true);
+            editor.insert_text(find_replacement);
+        }
+        mark_edited();
+        find_matches = md::find_all(doc, find_query);
+        find_current = -1;
+        status = std::string(tr("Заменено: ", "Replaced: ")) + std::to_string(matches.size());
+    }
+
+    void find_text_input(const std::string& text) {
+        find_text() += text;
+        if (find_field == 0) find_query_changed();
+    }
+
+    void find_backspace() {
+        std::string& t = find_text();
+        if (!t.empty()) {
+            size_t start = t.size() - 1;
+            while (start > 0 && (static_cast<unsigned char>(t[start]) & 0xC0) == 0x80) --start;
+            t.erase(start);
+        }
+        if (find_field == 0) find_query_changed();
+    }
+
+    void find_key(const SDL_KeyboardEvent& key) {
+        const bool shift = (key.mod & SDL_KMOD_SHIFT) != 0;
+        const bool ctrl = (key.mod & SDL_KMOD_CTRL) != 0;
+        switch (key.key) {
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+                if (find_replace_mode && find_field == 1) {
+                    if (ctrl) find_replace_all();
+                    else find_replace_current();
+                } else {
+                    find_step(!shift);
+                }
+                break;
+            case SDLK_TAB:
+                if (find_replace_mode) find_field = 1 - find_field;
+                break;
+            case SDLK_BACKSPACE: find_backspace(); break;
+            case SDLK_V:
+                if (ctrl) {
+                    char* clip = SDL_GetClipboardText();
+                    std::string t = clip ? clip : "";
+                    SDL_free(clip);
+                    for (char& c : t) {
+                        if (c == '\n' || c == '\r') c = ' ';
+                    }
+                    find_text() += t;
+                    if (find_field == 0) find_query_changed();
+                }
+                break;
+            case SDLK_F: if (ctrl) open_find(false); break;
+            case SDLK_H: if (ctrl) open_find(true); break;
+            default: break;
+        }
+    }
+
+    void find_click(float x, float y) {
+        find_focus = true;
+        for (int i = 0; i < 2; ++i) {
+            if (ui::contains(find_field_rect[i], x, y)) find_field = i;
+        }
+    }
+
+    void draw_find_field(ui::Rect r, const std::string& text, const char* placeholder,
+                         bool focused) {
+        using namespace ui;
+        fill_rounded_rect(ui, r, 4.0f, ui.palette.window_bg);
+        stroke_rect(ui, r, focused ? ui.palette.accent : ui.palette.panel_border);
+        const float ty = r.y + (r.h - text_height(fonts.regular)) / 2.0f;
+        const float max_w = r.w - 16.0f;
+        if (text.empty()) {
+            draw_text(ui, fonts.regular, placeholder, r.x + 8.0f, ty, ui.palette.text_dim);
+        } else {
+            const std::string shown = fit_text(fonts.regular, text, max_w);
+            draw_text(ui, fonts.regular, shown, r.x + 8.0f, ty, ui.palette.text);
+        }
+        if (focused && (SDL_GetTicks() / 530) % 2 == 0) {
+            const float cx = r.x + 8.0f
+                + std::min(text_width(fonts.regular, text), max_w);
+            fill_rect(ui, {cx, ty, 1.5f, text_height(fonts.regular)}, ui.palette.text);
+        }
+    }
+
+    void draw_find_bar(float x, float y, float w, bool replace) {
+        using namespace ui;
+        const float h = replace ? 76.0f : 36.0f;
+        find_bar_rect = Rect{x, y, w, h};
+        fill_rounded_rect(ui, find_bar_rect, 8.0f, ui.palette.panel_bg);
+        stroke_rect(ui, find_bar_rect, ui.palette.panel_border);
+
+        const float y1 = y + 4.0f;
+        const float y2 = y + 40.0f;
+        const Rect close_r{x + w - 6.0f - 28.0f, y1, 28.0f, 28.0f};
+        const Rect next_r{close_r.x - 4.0f - 28.0f, y1, 28.0f, 28.0f};
+        const Rect prev_r{next_r.x - 4.0f - 28.0f, y1, 28.0f, 28.0f};
+        std::string count;
+        if (!find_query.empty()) {
+            if (find_matches.empty()) {
+                count = tr("Нет совпадений", "No matches");
+            } else {
+                count = std::to_string(find_current < 0 ? 0 : find_current + 1) + " / "
+                    + std::to_string(find_matches.size());
+            }
+        }
+        const float count_w = count.empty() ? 0.0f : text_width(fonts.regular, count) + 12.0f;
+        const float field_x = x + 6.0f;
+        const float count_x = prev_r.x - 8.0f - count_w;
+        find_field_rect[0] = Rect{field_x, y1, std::max(60.0f, count_x - 8.0f - field_x), 28.0f};
+
+        draw_find_field(find_field_rect[0], find_query, tr("Поиск", "Find"),
+                        find_focus && find_field == 0);
+        if (!count.empty()) {
+            draw_text(ui, fonts.regular, count, count_x + 12.0f,
+                      y1 + (28.0f - text_height(fonts.regular)) / 2.0f,
+                      find_matches.empty() ? ui.palette.text_dim : ui.palette.text);
+        }
+
+        if (button(ui, "find_prev", prev_r, "<")) find_step(false);
+        if (button(ui, "find_next", next_r, ">")) find_step(true);
+        if (button(ui, "find_close", close_r, "×")) close_find();
+
+        if (replace) {
+            const Rect all_r{x + w - 6.0f - 56.0f, y2, 56.0f, 28.0f};
+            const Rect one_r{all_r.x - 4.0f - 96.0f, y2, 96.0f, 28.0f};
+            find_field_rect[1] = Rect{field_x, y2, std::max(60.0f, one_r.x - 8.0f - field_x), 28.0f};
+            draw_find_field(find_field_rect[1], find_replacement, tr("Заменить на", "Replace with"),
+                            find_focus && find_field == 1);
+            if (button(ui, "rep_one", one_r, tr("Заменить", "Replace"))) find_replace_current();
+            if (button(ui, "rep_all", all_r, tr("Все", "All"))) find_replace_all();
+        } else {
+            find_field_rect[1] = Rect{};
+        }
+    }
+
+    // ---------- outline ----------
+
+    void toggle_outline() {
+        outline_open = !outline_open;
+        if (!outline_open) outline_rows.clear();
+    }
+
+    void draw_outline(ui::Rect side) {
+        using namespace ui;
+        fill_rect(ui, side, ui.palette.panel_bg);
+        fill_rect(ui, {side.x + side.w - 1.0f, side.y, 1.0f, side.h}, ui.palette.panel_border);
+        draw_text(ui, fonts.bold, tr("Оглавление", "Outline"), side.x + 12.0f, side.y + 10.0f,
+                  ui.palette.text);
+
+        outline_rows.clear();
+        const float row_h = 22.0f;
+        float y = side.y + 40.0f;
+        for (size_t bi = 0; bi < doc.blocks.size(); ++bi) {
+            const md::Block& block = doc.blocks[bi];
+            if (block.type != md::BlockType::Heading) continue;
+            if (y + row_h > side.y + side.h) break;
+            const Rect row{side.x + 6.0f, y, side.w - 13.0f, row_h};
+            std::string title;
+            for (const md::Inline& inl : block.inlines) title += inl.text;
+            if (title.empty()) title = tr("(пустой заголовок)", "(empty heading)");
+            const float indent = 8.0f + (std::clamp(block.level, 1, 6) - 1) * 12.0f;
+            if (contains(row, ui.input.mouse_x, ui.input.mouse_y)) {
+                fill_rounded_rect(ui, row, 4.0f, ui.palette.button_hover);
+            }
+            draw_text(ui, fonts.regular, fit_text(fonts.regular, title, row.w - indent - 6.0f),
+                      row.x + indent, y + 3.0f, ui.palette.text);
+            outline_rows.push_back({row, static_cast<int>(bi)});
+            y += row_h;
+        }
+        if (outline_rows.empty()) {
+            draw_text(ui, fonts.regular, tr("Заголовков нет", "No headings"), side.x + 12.0f,
+                      side.y + 40.0f, ui.palette.text_dim);
+        }
+    }
+
+    // Moves the caret to a clicked heading. False when the point is not on a row.
+    bool outline_click(float x, float y) {
+        for (const auto& [row, block] : outline_rows) {
+            if (!ui::contains(row, x, y)) continue;
+            editor.set_caret(md::Pos{block, 0, 0});
+            for (const md::Line& line : layout.lines) {
+                if (line.block != block) continue;
+                scroll_y = std::clamp(line.y - 12.0f, 0.0f, max_scroll);
+                break;
+            }
+            return true;
+        }
+        return false;
     }
 
     void apply_history(bool redo) {
@@ -1598,20 +2064,39 @@ void handle_key(const SDL_KeyboardEvent& key) {
 
     void draw_workspace() {
         using namespace ui;
-        const Rect area{0, toolbar_h, static_cast<float>(width),
-                        static_cast<float>(height) - toolbar_h - 28.0f};
+        Rect area{0, toolbar_h, static_cast<float>(width),
+                  static_cast<float>(height) - toolbar_h - 28.0f};
         ui::fill_rect(ui, area, ui.palette.window_bg);
+        if (outline_open) {
+            draw_outline(Rect{area.x, area.y, kOutlineW, area.h});
+            area.x += kOutlineW;
+            area.w -= kOutlineW;
+        }
 
         const float content_w = std::min(760.0f, area.w - 64.0f);
         const float content_x = area.x + (area.w - content_w) / 2.0f;
-        const Rect viewport{content_x, area.y + 24.0f, content_w, area.h - 48.0f};
+        // The find bar sits above the document and pushes the text down.
+        const float top = find_open ? 8.0f + (find_replace_mode ? 76.0f : 36.0f) + 8.0f : 24.0f;
+        const Rect viewport{content_x, area.y + top, content_w, area.h - top - 24.0f};
 
-        if (content_w != laid_out_width || doc_dirty) {
+        if (content_w != laid_out_width || zoom != laid_out_zoom || doc_dirty) {
+            fontbook.set_zoom(zoom);
             md::layout_document(doc, fontbook, content_w, layout);
             laid_out_width = content_w;
+            laid_out_zoom = zoom;
             doc_dirty = false;
+            word_count = md::count_words(doc);
+            if (find_open) find_sync();
         }
         max_scroll = std::max(0.0f, layout.content_height - viewport.h + 24.0f);
+        // Re-anchor the view: document geometry scales proportionally with the
+        // zoom, so the held point moves by the zoom ratio. Keep it under the
+        // cursor by shifting the scroll by the same amount.
+        if (zoom_anchor_doc_y >= 0.0f) {
+            const float ratio = zoom / zoom_anchor_old_zoom;
+            scroll_y = zoom_anchor_doc_y * ratio - zoom_anchor_view_y;
+            zoom_anchor_doc_y = -1.0f;
+        }
         scroll_y = std::clamp(scroll_y, 0.0f, max_scroll);
         doc_viewport = viewport;
 
@@ -1625,6 +2110,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
         view.caret_visible = (SDL_GetTicks() - editor.blink_tick) % 1060 < 530;
         view.caret = editor.caret();
         md::render_document(ui, doc, layout, fontbook, viewport, scroll_y, &view);
+        if (find_open) draw_find_bar(content_x, area.y + 8.0f, content_w, find_replace_mode);
 
         if (max_scroll > 0.0f) {
             const float thumb_h = std::max(30.0f,
@@ -1648,7 +2134,13 @@ void handle_key(const SDL_KeyboardEvent& key) {
         const float y = static_cast<float>(height) - 28.0f;
         ui::fill_rect(ui, {0, y, static_cast<float>(width), 28.0f}, ui.palette.panel_bg);
         ui::fill_rect(ui, {0, y, static_cast<float>(width), 1.0f}, ui.palette.panel_border);
-        const std::string right = kDialects[dialect] + "  ·  UTF-8";
+        std::string right = kDialects[dialect] + "  ·  UTF-8";
+        right = std::string(tr("Слов: ", "Words: ")) + std::to_string(word_count) + "  ·  " + right;
+        if (zoom != 1.0f) {
+            char zbuf[16];
+            std::snprintf(zbuf, sizeof(zbuf), "%.0f%%", zoom * 100.0f);
+            right = zbuf + ("  ·  " + right);
+        }
         const float right_w = text_width(fonts.regular, right);
         const float max_w = static_cast<float>(width) - right_w - 48.0f;
 
@@ -2701,6 +3193,13 @@ void handle_key(const SDL_KeyboardEvent& key) {
                 if (e.button.button == SDL_BUTTON_LEFT) {
                     ui.input.down = true;
                     ui.input.pressed = true;
+                    if (find_open && ui::contains(find_bar_rect, e.button.x, e.button.y)) {
+                        find_click(e.button.x, e.button.y);
+                    }
+                    if (outline_open && !welcome_open && !pandoc_help_open
+                        && outline_click(e.button.x, e.button.y)) {
+                        break;
+                    }
                     if (welcome_open) {
                         using namespace ui;
                         const float w = std::min(680.0f, static_cast<float>(width) - 32.0f);
@@ -2931,6 +3430,10 @@ void handle_key(const SDL_KeyboardEvent& key) {
                 }
                 break;
             case SDL_EVENT_TEXT_INPUT:
+                if (find_open && find_focus) {
+                    find_text_input(e.text.text);
+                    break;
+                }
                 if (welcome_open || pandoc_help_open) {
                     break;
                 }
@@ -2956,6 +3459,10 @@ void handle_key(const SDL_KeyboardEvent& key) {
                     break;
                 }
                 if (e.key.key == SDLK_ESCAPE) {
+                    if (find_open) {
+                        close_find();
+                        break;
+                    }
                     if (welcome_open) {
                         welcome_open = false;
                         break;
@@ -2980,6 +3487,10 @@ void handle_key(const SDL_KeyboardEvent& key) {
                         break;
                     }
                     ui.open_popup.clear();
+                    break;
+                }
+                if (find_open && find_focus) {
+                    find_key(e.key);
                     break;
                 }
                 if (welcome_open || pandoc_help_open) {
@@ -3138,7 +3649,16 @@ void handle_key(const SDL_KeyboardEvent& key) {
             case SDL_EVENT_MOUSE_WHEEL: {
                 float dy = e.wheel.y;
                 if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) dy = -dy;
-                scroll_y = std::clamp(scroll_y - dy * 48.0f, 0.0f, max_scroll);
+                if (dy == 0.0f) break;
+                float my = 0.0f;
+                SDL_GetMouseState(nullptr, &my);
+                if (SDL_GetModState() & SDL_KMOD_CTRL) {
+                    // Ctrl + wheel zooms the document in 10% steps.
+                    const float step = 0.1f;
+                    zoom_to(zoom + (dy > 0.0f ? step : -step), my);
+                } else {
+                    scroll_y = std::clamp(scroll_y - dy * 48.0f, 0.0f, max_scroll);
+                }
                 break;
             }
             default:
@@ -3200,6 +3720,7 @@ int main(int argc, char** argv) {
     const std::string screenshot = argc > 2 ? argv[2] : "selftest.bmp";
 
     App app;
+    app.selftest_mode = selftest;
     g_app = &app;
     if (!app.init()) {
         app.shutdown();
@@ -4637,6 +5158,86 @@ int main(int argc, char** argv) {
             std::printf("selftest v1.0.1 fixes ok: open_from_path, drop, chart, formula, dblclick\n");
         }
 
+        {
+            md::import_markdown("# Заголовок\n\nПривет мир, привет **всем**\n\n## Ещё\n\nтекст\n",
+                                false, app.doc);
+            app.editor.set_caret(md::Pos{0, 0, 0});
+            app.history.reset(app.doc, app.editor.caret(), app.editor.anchor());
+            app.doc_dirty = true;
+            app.frame();
+
+            auto key_mod = [](SDL_Keycode k, SDL_Keymod m) {
+                SDL_Event e{};
+                e.type = SDL_EVENT_KEY_DOWN;
+                e.key.key = k;
+                e.key.mod = m;
+                return e;
+            };
+            auto text_in = [](const char* t) {
+                SDL_Event e{};
+                e.type = SDL_EVENT_TEXT_INPUT;
+                e.text.text = t;
+                return e;
+            };
+
+            bool ok = true;
+            auto expect = [&](const char* what, bool cond) {
+                if (!cond) {
+                    std::fprintf(stderr, "selftest find: %s failed\n", what);
+                    ok = false;
+                }
+            };
+
+            expect("case-insensitive Cyrillic search", md::find_all(app.doc, "ПРИВЕТ").size() == 2);
+            expect("word count", md::count_words(app.doc) == 7);
+
+            app.dispatch(key_mod(SDLK_F, SDL_KMOD_CTRL));
+            expect("ctrl+F opens find", app.find_open && app.find_focus && !app.find_replace_mode);
+            app.dispatch(text_in("привет"));
+            expect("typing selects first match", app.find_matches.size() == 2
+                && app.find_current == 0 && app.editor.has_selection());
+            app.dispatch(key_mod(SDLK_RETURN, SDL_KMOD_NONE));
+            expect("Enter selects next match", app.find_current == 1);
+
+            app.dispatch(key_mod(SDLK_H, SDL_KMOD_CTRL));
+            expect("ctrl+H opens replace", app.find_open && app.find_replace_mode);
+            app.dispatch(key_mod(SDLK_TAB, SDL_KMOD_NONE));
+            app.dispatch(text_in("Hi"));
+            app.dispatch(key_mod(SDLK_RETURN, SDL_KMOD_CTRL));
+            expect("replace all", md::find_all(app.doc, "привет").empty()
+                && md::find_all(app.doc, "hi").size() == 2);
+
+            app.frame();
+            expect("word count unchanged by replace", app.word_count == 7);
+            const std::string find_shot = screenshot.substr(0, screenshot.find_last_of('.'))
+                + "_find.bmp";
+            if (!save_frame(find_shot)) {
+                app.shutdown();
+                return 1;
+            }
+
+            app.dispatch(key_mod(SDLK_ESCAPE, SDL_KMOD_NONE));
+            expect("Escape closes find", !app.find_open);
+
+            app.dispatch(key_mod(SDLK_T, static_cast<SDL_Keymod>(SDL_KMOD_CTRL | SDL_KMOD_SHIFT)));
+            app.frame();
+            expect("outline lists headings", app.outline_open && app.outline_rows.size() == 2);
+            const ui::Rect row = app.outline_rows[1].first;
+            expect("outline click moves caret", app.outline_click(row.x + 5.0f, row.y + 5.0f)
+                && app.editor.caret().block == 2);
+            app.frame();
+            if (!save_frame(find_shot.substr(0, find_shot.size() - 4) + "_outline.bmp")) {
+                app.shutdown();
+                return 1;
+            }
+
+            if (!ok) {
+                app.shutdown();
+                return 1;
+            }
+        }
+
+        std::printf("selftest find/outline ok: search, replace, word count, outline\n");
         std::printf("selftest edit ok: insert/split/merge/select/delete/roundtrip\n");
         app.shutdown();
         return 0;
@@ -4671,6 +5272,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (argc <= 1) app.offer_recovery();
+
     bool running = true;
     while (running) {
         SDL_Event e;
@@ -4678,7 +5281,9 @@ int main(int argc, char** argv) {
             running = app.dispatch(e) && running;
         }
         app.frame();
+        app.autosave_tick();
     }
+    if (!app.modified) app.remove_autosave();
     app.shutdown();
     return 0;
 }

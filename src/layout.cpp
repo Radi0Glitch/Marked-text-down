@@ -275,12 +275,13 @@ void layout_table(const Block& block, int bi, FontBook& fonts, float width, floa
     }
 
     const float top = y;
+    const float z = fonts.zoom();
     std::vector<float> natural(static_cast<size_t>(cols), kMinColumn);
     for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < cols; ++c) {
             const std::uint8_t extra = r == 0 ? StyleBold : 0;
             const float w = cell_text_width(fonts, block, block.cells[r * cols + c], extra)
-                + 2.0f * kCellPadX;
+                + 2.0f * kCellPadX * z;
             natural[c] = std::max(natural[c], w);
         }
     }
@@ -302,16 +303,16 @@ void layout_table(const Block& block, int bi, FontBook& fonts, float width, floa
         for (int c = 0; c < cols; ++c) {
             const int index = r * cols + c;
             BlockMetrics cell_metrics;
-            cell_metrics.indent = grid.xs[c] + kCellPadX;
-            float cy = y + kCellPadY;
+            cell_metrics.indent = grid.xs[c] + kCellPadX * z;
+            float cy = y + kCellPadY * z;
             const size_t first_line = out.lines.size();
             layout_text(block, block.cells[index], bi, index, r == 0 ? StyleBold : 0, fonts,
-                        cell_metrics, grid.xs[c + 1] - kCellPadX, cy, out);
+                        cell_metrics, grid.xs[c + 1] - kCellPadX * z, cy, out);
             align_lines(out, first_line, block.aligns[c], cell_metrics.indent,
-                        grid.xs[c + 1] - kCellPadX);
+                        grid.xs[c + 1] - kCellPadX * z);
             row_bottom = std::max(row_bottom, cy - cell_metrics.leading);
         }
-        y = row_bottom + kCellPadY;
+        y = row_bottom + kCellPadY * z;
         grid.ys.push_back(y);
     }
 
@@ -357,11 +358,16 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
     for (size_t bi = 0; bi < doc.blocks.size(); ++bi) {
         const Block& block = doc.blocks[bi];
         BlockMetrics metrics = metrics_for(block, bi == 0);
+        const float z = fonts.zoom();
+        metrics.pad_before *= z;
+        metrics.pad_after *= z;
+        metrics.indent *= z;
+        metrics.leading *= z;
 
         // A list ends with a little more air before the next block.
         if (bi > 0 && doc.blocks[bi - 1].type == BlockType::ListItem
             && block.type != BlockType::ListItem) {
-            y += 8.0f;
+            y += 8.0f * z;
         }
 
         // Markers: "•" for bullets, running numbers for ordered items. A number
@@ -390,7 +396,7 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
         if (block.type == BlockType::ListItem && !marker.empty()) {
             TTF_Font* mf = font_for(fonts, block, 0);
             const float mw = measure(mf, marker, 0, static_cast<int>(marker.size()));
-            const float needed = 10.0f + mw + 6.0f;
+            const float needed = 10.0f * z + mw + 6.0f * z;
             if (metrics.indent < needed) metrics.indent = needed;
         }
 
@@ -411,7 +417,7 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
                 std::string tex;
                 for (const Inline& inl : block.inlines) tex += inl.text;
                 const MathNode node = math_from_latex(tex);
-                const auto sz = mathdraw::render(nullptr, fonts, node, 0, 0, 18.0f,
+                const auto sz = mathdraw::render(nullptr, fonts, node, 0, 0, 18.0f * z,
                                                  nullptr, nullptr);
                 LineBuilder builder(static_cast<int>(bi), -1, 0, metrics, width);
                 builder.set_default_font(font_for(fonts, block, 0));

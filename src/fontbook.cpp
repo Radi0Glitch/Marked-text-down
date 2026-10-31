@@ -1,5 +1,7 @@
 #include "fontbook.hpp"
 
+#include <algorithm>
+
 namespace md {
 
 bool FontBook::init(const std::string& dir) {
@@ -20,9 +22,14 @@ void FontBook::clear() {
     cache_.clear();
 }
 
+void FontBook::set_zoom(float zoom) {
+    zoom_ = std::clamp(zoom, 0.5f, 2.0f);
+}
+
 TTF_Font* FontBook::get(Family family, bool bold, bool italic, float size, bool strike) {
+    const float zoomed = size * zoom_;
     const auto key = std::make_tuple(static_cast<int>(family), bold, italic, strike,
-                                     static_cast<int>(size * 4.0f));
+                                     static_cast<int>(zoomed * 4.0f));
     if (const auto it = cache_.find(key); it != cache_.end()) {
         return it->second;
     }
@@ -41,7 +48,7 @@ TTF_Font* FontBook::get(Family family, bool bold, bool italic, float size, bool 
             break;
     }
 
-    TTF_Font* font = TTF_OpenFont((dir_ + "/" + file).c_str(), size);
+    TTF_Font* font = TTF_OpenFont((dir_ + "/" + file).c_str(), zoomed);
     if (font) {
         TTF_SetFontHinting(font, TTF_HINTING_NORMAL);
         int style = 0;

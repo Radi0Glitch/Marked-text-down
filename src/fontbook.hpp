@@ -17,10 +17,16 @@ public:
     bool init(const std::string& dir);
     void clear();
 
+    // Document zoom: every font requested through get() is multiplied by it.
+    // Clamped to [0.5, 2.0] so the cache stays bounded.
+    void set_zoom(float zoom);
+    float zoom() const { return zoom_; }
+
     TTF_Font* get(Family family, bool bold, bool italic, float size, bool strike = false);
 
 private:
     std::string dir_;
+    float zoom_ = 1.0f;
     std::map<std::tuple<int, bool, bool, bool, int>, TTF_Font*> cache_;
 };
 

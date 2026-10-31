@@ -12,6 +12,8 @@ std::string save_export(const std::string& suggested_name, const std::string& fi
 
 // 1 = save, 2 = discard, 0 = cancel.
 int ask_save_changes(const std::string& document_name);
+// True when the user wants to restore the unsaved copy left by a previous run.
+bool ask_restore_autosave();
 
 void show_error(const std::string& message);
 void show_info(const std::string& title, const std::string& message);
