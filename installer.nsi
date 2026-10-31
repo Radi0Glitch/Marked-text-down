@@ -50,7 +50,7 @@ Section "Marked-text-down" SecMain
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Marked-text-down" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Marked-text-down" "DisplayIcon" '"$INSTDIR\marked-text-down.exe"'
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Marked-text-down" "Publisher" "Marked-text-down"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Marked-text-down" "DisplayVersion" "1.0.1"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Marked-text-down" "DisplayVersion" "1.1.0"
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Marked-text-down" "NoModify" 1
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Marked-text-down" "NoRepair" 1
   WriteUninstaller "$INSTDIR\uninstall.exe"

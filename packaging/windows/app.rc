@@ -4,8 +4,8 @@
 IDI_ICON1 ICON "mtd-logo.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,0,1,0
- PRODUCTVERSION 1,0,1,0
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
  FILEOS 0x40004L
  FILETYPE 0x1L
 BEGIN
@@ -15,7 +15,7 @@ BEGIN
         BEGIN
             VALUE "FileDescription", "Marked-text-down Markdown editor"
             VALUE "ProductName", "Marked-text-down"
-            VALUE "ProductVersion", "1.0.1"
+            VALUE "ProductVersion", "1.1.0"
             VALUE "OriginalFilename", "marked-text-down.exe"
         END
     END

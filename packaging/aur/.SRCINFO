@@ -1,6 +1,6 @@
 pkgbase = marked-text-down-git
 	pkgdesc = Lightweight cross-platform visual (WYSIWYG) Markdown editor with formulas, diagrams and charts
-	pkgver = r1.0.1
+	pkgver = r1.1.0
 	pkgrel = 1
 	url = https://github.com/Radi0Glitch/Marked-text-down
 	arch = x86_64
