@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SDL_VERSION: "3.4.18"
+  SDL_TTF_VERSION: "3.2.2"
+  PANDOC_VERSION: "3.8.2.1"
+  TYPST_VERSION: "0.15.1"
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkgconf cmake libfreetype-dev
+
+      - name: SDL3 and SDL3_ttf from source
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          curl -fsSL -O "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz"
+          tar xzf "SDL3-$SDL_VERSION.tar.gz"
+          cmake -S "SDL3-$SDL_VERSION" -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build sdl-build -j"$(nproc)"
+          sudo cmake --install sdl-build
+          curl -fsSL -O "https://github.com/libsdl-org/SDL_ttf/releases/download/release-$SDL_TTF_VERSION/SDL3_ttf-$SDL_TTF_VERSION.tar.gz"
+          tar xzf "SDL3_ttf-$SDL_TTF_VERSION.tar.gz"
+          cmake -S "SDL3_ttf-$SDL_TTF_VERSION" -B ttf-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DSDLTTF_VENDORED=ON -DSDLTTF_SAMPLES=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_PREFIX_PATH=/usr/local
+          cmake --build ttf-build -j"$(nproc)"
+          sudo cmake --install ttf-build
+          sudo ldconfig
+
+      - name: Build
+        run: |
+          meson setup build-rel --prefix=/usr --buildtype=release
+          meson compile -C build-rel
+
+      - name: Portable archive
+        run: |
+          set -e
+          R="$GITHUB_WORKSPACE/Marked-text-down-linux-x86_64"
+          mkdir -p "$R/fonts" "$R/tools/pandoc/linux-x86_64" "$R/tools/typst/linux-x86_64"
+          cp build-rel/marked-text-down "$R/"
+          cp fonts/FiraSans-*.ttf fonts/FiraMono-*.ttf fonts/PT_Serif-Web-*.ttf fonts/NotoSans-Regular.ttf fonts/NotoSansMath-Regular.ttf fonts/*OFL*.txt "$R/fonts/"
+          cp README.md LICENSE.md marked-text-down.desktop "$R/"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o pandoc.tgz "https://github.com/jgm/pandoc/releases/download/$PANDOC_VERSION/pandoc-$PANDOC_VERSION-linux-amd64.tar.gz"
+          tar xzf pandoc.tgz
+          cp "pandoc-$PANDOC_VERSION/bin/pandoc" "$R/tools/pandoc/linux-x86_64/"
+          curl -fsSL -o typst.tar.xz "https://github.com/typst/typst/releases/download/v$TYPST_VERSION/typst-x86_64-unknown-linux-musl.tar.xz"
+          tar xJf typst.tar.xz
+          cp typst-x86_64-unknown-linux-musl/typst "$R/tools/typst/linux-x86_64/"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar czf "$GITHUB_WORKSPACE/dist/Marked-text-down-linux-x86_64.tar.gz" -C "$GITHUB_WORKSPACE" Marked-text-down-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/Marked-text-down-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkgconf gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 nsis unzip
+
+      - name: SDL3 and SDL3_ttf for mingw
+        run: |
+          set -e
+          D="$RUNNER_TEMP/mingw"
+          mkdir -p "$D"
+          cd "$D"
+          curl -fsSL -O "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-devel-$SDL_VERSION-mingw.tar.gz"
+          curl -fsSL -O "https://github.com/libsdl-org/SDL_ttf/releases/download/release-$SDL_TTF_VERSION/SDL3_ttf-devel-$SDL_TTF_VERSION-mingw.tar.gz"
+          tar xzf "SDL3-devel-$SDL_VERSION-mingw.tar.gz"
+          tar xzf "SDL3_ttf-devel-$SDL_TTF_VERSION-mingw.tar.gz"
+          for d in "SDL3-$SDL_VERSION" "SDL3_ttf-$SDL_TTF_VERSION"; do
+            sed -i 's#^prefix=.*#prefix=${pcfiledir}/../..#' "$d/x86_64-w64-mingw32/lib/pkgconfig/"*.pc
+          done
+          cat > cross.ini <<EOF
+          [binaries]
+          c = 'x86_64-w64-mingw32-gcc'
+          cpp = 'x86_64-w64-mingw32-g++'
+          ar = 'x86_64-w64-mingw32-ar'
+          strip = 'x86_64-w64-mingw32-strip'
+          windres = 'x86_64-w64-mingw32-windres'
+          pkgconfig = 'pkg-config'
+
+          [host_machine]
+          system = 'windows'
+          cpu_family = 'x86_64'
+          cpu = 'x86_64'
+          endian = 'little'
+
+          [properties]
+          pkg_config_libdir = '$D/SDL3-$SDL_VERSION/x86_64-w64-mingw32/lib/pkgconfig:$D/SDL3_ttf-$SDL_TTF_VERSION/x86_64-w64-mingw32/lib/pkgconfig'
+          EOF
+
+      - name: Build
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          meson setup build-win --cross-file "$RUNNER_TEMP/mingw/cross.ini" --buildtype=release
+          meson compile -C build-win
+
+      - name: Installer
+        run: |
+          set -e
+          D="$RUNNER_TEMP/mingw"
+          W="$GITHUB_WORKSPACE/dist/Marked-text-down-windows-x86_64"
+          mkdir -p "$W/fonts" "$W/tools/pandoc/windows-x86_64" "$W/tools/typst/windows-x86_64"
+          cp build-win/marked-text-down.exe "$W/"
+          cp "$D/SDL3-$SDL_VERSION/x86_64-w64-mingw32/bin/SDL3.dll" "$D/SDL3_ttf-$SDL_TTF_VERSION/x86_64-w64-mingw32/bin/SDL3_ttf.dll" "$W/"
+          cp fonts/FiraSans-*.ttf fonts/FiraMono-*.ttf fonts/PT_Serif-Web-*.ttf fonts/NotoSans-Regular.ttf fonts/NotoSansMath-Regular.ttf fonts/*OFL*.txt "$W/fonts/"
+          cp README.md LICENSE.md marked-text-down.desktop mtd-logo.ico installer.nsi "$W/"
+          cd "$D"
+          curl -fsSL -o pandoc.zip "https://github.com/jgm/pandoc/releases/download/$PANDOC_VERSION/pandoc-$PANDOC_VERSION-windows-x86_64.zip"
+          mkdir -p pandoc && unzip -q -o pandoc.zip -d pandoc
+          cp "$(find pandoc -name pandoc.exe | head -1)" "$W/tools/pandoc/windows-x86_64/"
+          curl -fsSL -o typst.zip "https://github.com/typst/typst/releases/download/v$TYPST_VERSION/typst-x86_64-pc-windows-msvc.zip"
+          mkdir -p typst && unzip -q -o typst.zip -d typst
+          cp "$(find typst -name typst.exe | head -1)" "$W/tools/typst/windows-x86_64/"
+          cd "$W"
+          makensis installer.nsi
+          test -f "$GITHUB_WORKSPACE/dist/Marked-text-down-Setup-x86_64.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Marked-text-down-Setup-x86_64.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Sign
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -e
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          cd out
+          for f in *.tar.gz *.exe; do
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+              --armor --detach-sign -u F97C07F236D69415 "$f"
+          done
+          ls -la
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/* --title "Marked-text-down $GITHUB_REF_NAME" --generate-notes
