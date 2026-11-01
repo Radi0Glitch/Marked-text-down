@@ -35,11 +35,12 @@
   - Стартовое окно обзора возможностей (`F1` или кнопка `?`) с запоминанием настроек между запусками.
   - Полноценная история изменений (**Undo / Redo** — `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z`).
   - Перетаскивание полосы прокрутки, двойной клик в пустой зоне под документом добавляет абзац.
+  - Ссылки: кнопка «Ссылка» или `Ctrl+K`. `Ctrl+клик` открывает сайт в браузере или файл в программе по умолчанию. Файлы и картинки показываются миниатюрой с иконкой.
+  - Окно и масштаб текста запоминаются между запусками.
 
-  ![скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image.png)
-  ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(2).png)
-  ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(7).png)
-  ![Скрин](https://github.com/Radi0Glitch/Marked-text-down/blob/main/tests/fixtures/Pasted%20image%20(8).png)
+  ![Редактор, светлая тема](docs/screenshots/editor-light.png)
+  ![Редактор, тёмная тема](docs/screenshots/editor-dark.png)
+  ![Ссылки и файлы](docs/screenshots/links.png)
 
 ---
 
@@ -157,5 +158,7 @@ SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software \
 ## Шрифты и лицензии
 
 - **Fira Sans** (Regular, Bold, Italic, BoldItalic) и **Fira Mono** (Regular, Bold) с поддержкой латиницы и кириллицы — SIL Open Font License (`fonts/OFL.txt`, `fonts/FiraMono-OFL.txt`).
+- **PT Serif** (Regular, Bold, Italic, BoldItalic) — текст документа, SIL Open Font License (`fonts/PT_Serif-OFL.txt`).
+- **Noto Sans** и **Noto Sans Math** — запасные шрифты для стрелок, надстрочных символов и математики, SIL Open Font License (`fonts/NotoSans-OFL.txt`, `fonts/NotoSansMath-OFL.txt`).
 - **md4c** — MIT License (`third_party/md4c/LICENSE.md`).
 - **tinyfiledialogs** — zlib License (`third_party/tinyfiledialogs/`).

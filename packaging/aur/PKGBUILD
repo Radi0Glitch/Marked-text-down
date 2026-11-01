@@ -1,7 +1,7 @@
 # Maintainer: Radi0Glitch <radioglitch at github>
 
 pkgname=marked-text-down-git
-pkgver=r1.1.0
+pkgver=r1.2.0
 pkgrel=1
 pkgdesc="Lightweight cross-platform visual (WYSIWYG) Markdown editor with formulas, diagrams and charts"
 arch=('x86_64')
