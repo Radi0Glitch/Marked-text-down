@@ -18,11 +18,13 @@ namespace {
 constexpr float kCellPadX = 8.0f;
 constexpr float kCellPadY = 5.0f;
 constexpr float kMinColumn = 56.0f;
+// Height of the title strip painted at the top of a code block card.
+constexpr float kCodeHeaderH = 30.0f;
 
 float size_for(const Block& block) {
     switch (block.type) {
         case BlockType::Heading: {
-            static constexpr float sizes[6] = {30, 25, 21, 18, 17, 17};
+            static constexpr float sizes[6] = {40, 24, 20, 18, 17, 17};
             const int level = std::clamp(block.level, 1, 6);
             return sizes[level - 1];
         }
@@ -48,13 +50,33 @@ struct Atom {
     bool space = false;
     float width = 0;
     TTF_Font* font = nullptr;
+    bool math = false;  // an inline formula: width and height come from the formula
+    float height = 0;
+    float ascent = 0;
+    bool icon = false;  // the file thumbnail in front of a file link, no text
 };
+
+// The closing $ of an inline formula that opens at `open`, or -1. The rules follow
+// the usual ones: no space right after the opening $ or before the closing one,
+// no digit right after the closing one (so "$5 and $10" stays plain text).
+int find_math_close(const std::string& text, int open) {
+    const int size = static_cast<int>(text.size());
+    if (open + 2 >= size || text[open + 1] == ' ' || text[open + 1] == '$') return -1;
+    for (int q = open + 1; q < size; ++q) {
+        if (text[q] == '\n') return -1;
+        if (text[q] != '$') continue;
+        if (text[q - 1] == ' ') return -1;
+        if (q + 1 < size && text[q + 1] >= '0' && text[q + 1] <= '9') return -1;
+        return q;
+    }
+    return -1;
+}
 
 struct BlockMetrics {
     float indent = 0;      // text indent inside the content column
     float pad_before = 0;
     float pad_after = 0;
-    float leading = 6.0f;  // extra space between lines
+    float leading = 10.0f; // extra space between lines
     bool preformatted = false;
 };
 
@@ -107,8 +129,13 @@ public:
     }
 
     void add(const Atom& atom) {
-        update_metrics(atom.font);
-        line_.spans.push_back(Span{atom.inl, atom.begin, atom.end, cursor_, atom.width});
+        if (atom.math) {
+            max_height_ = std::max(max_height_, atom.height);
+            max_ascent_ = std::max(max_ascent_, atom.ascent);
+        } else {
+            update_metrics(atom.font);
+        }
+        line_.spans.push_back(Span{atom.inl, atom.begin, atom.end, cursor_, atom.width, atom.math, atom.icon});
         cursor_ += atom.width;
     }
 
@@ -167,7 +194,8 @@ private:
 // downwards. `width` is the right edge of the usable column.
 void layout_text(const Block& block, const std::vector<Inline>& inlines, int block_index,
                  int cell, std::uint8_t extra_style, FontBook& fonts,
-                 const BlockMetrics& metrics, float width, float& y, Layout& out) {
+                 const BlockMetrics& metrics, float width, float& y, Layout& out,
+                 const MathReveal& reveal) {
     LineBuilder builder(block_index, cell, extra_style, metrics, width);
     builder.set_default_font(font_for(fonts, block, extra_style));
     const float avail = width - metrics.indent;
@@ -179,7 +207,33 @@ void layout_text(const Block& block, const std::vector<Inline>& inlines, int blo
         TTF_Font* font = font_for(fonts, block, inl.style | extra_style);
         const std::string& text = inl.text;
         int pos = 0;
+        const bool continues_chip = ii > 0 && is_file_link(inlines[ii - 1])
+                                    && inlines[ii - 1].href == inl.href;
+        if (is_file_link(inl) && !inl.text.empty() && !continues_chip) {
+            Atom icon{static_cast<int>(ii), 0, 0, false, file_icon_width(fonts.zoom()), font};
+            icon.icon = true;
+            atoms.push_back(icon);
+        }
         while (pos < static_cast<int>(text.size())) {
+            // A formula starts at a word boundary; the revealed one stays plain text.
+            if (text[pos] == '$' && (pos == 0 || text[pos - 1] == ' ') && !(inl.style & StyleCode)
+                && !(reveal.block == block_index && reveal.cell == cell && reveal.inl == static_cast<int>(ii)
+                     && reveal.begin == pos)) {
+                const int close = find_math_close(text, pos);
+                if (close > 0) {
+                    const float fsize = math_size(block, fonts.zoom());
+                    const auto sz = mathdraw::render(nullptr, fonts, math_from_latex(text.substr(
+                                                         pos + 1, close - pos - 1)),
+                                                     0, 0, fsize, nullptr, nullptr);
+                    Atom a{static_cast<int>(ii), pos, close + 1, false, sz.w + 4.0f, font};
+                    a.math = true;
+                    a.height = sz.h;
+                    a.ascent = sz.h * 0.8f;
+                    atoms.push_back(a);
+                    pos = close + 1;
+                    continue;
+                }
+            }
             const bool space = text[pos] == ' ';
             int end = pos;
             while (end < static_cast<int>(text.size())
@@ -204,7 +258,7 @@ void layout_text(const Block& block, const std::vector<Inline>& inlines, int blo
             builder.finish_line(out, y);
             if (atom.space) continue;
         }
-        if (!builder.fits(atom) && builder.empty() && !atom.space) {
+        if (!builder.fits(atom) && builder.empty() && !atom.space && !atom.math) {
             // Single word wider than the column: split by UTF-8 chars.
             const std::string& text = inlines[atom.inl].text;
             int start = atom.begin;
@@ -266,7 +320,7 @@ void align_lines(Layout& out, size_t from, TableAlign align, float left, float r
 // Columns share the content width in proportion to their natural width. Rows
 // grow to fit wrapped text. The header row is bold.
 void layout_table(const Block& block, int bi, FontBook& fonts, float width, float& y,
-                  Layout& out) {
+                  Layout& out, const MathReveal& reveal) {
     const int cols = table_cols(block);
     const int rows = table_rows(block);
     if (cols == 0 || rows == 0) {
@@ -307,7 +361,7 @@ void layout_table(const Block& block, int bi, FontBook& fonts, float width, floa
             float cy = y + kCellPadY * z;
             const size_t first_line = out.lines.size();
             layout_text(block, block.cells[index], bi, index, r == 0 ? StyleBold : 0, fonts,
-                        cell_metrics, grid.xs[c + 1] - kCellPadX * z, cy, out);
+                        cell_metrics, grid.xs[c + 1] - kCellPadX * z, cy, out, reveal);
             align_lines(out, first_line, block.aligns[c], cell_metrics.indent,
                         grid.xs[c + 1] - kCellPadX * z);
             row_bottom = std::max(row_bottom, cy - cell_metrics.leading);
@@ -346,11 +400,12 @@ TTF_Font* font_for(FontBook& fonts, const Block& block, std::uint8_t style) {
     const bool italic = !code_block && (style & StyleItalic);
     const bool strike = !code_block && (style & StyleStrike);
     const Family family = (style & StyleCode) || block.type == BlockType::CodeBlock
-        ? Family::Mono : Family::Sans;
+        ? Family::Mono : Family::Serif;
     return fonts.get(family, bold, italic, size_for(block), strike);
 }
 
-void layout_document(const Document& doc, FontBook& fonts, float width, Layout& out) {
+void layout_document(const Document& doc, FontBook& fonts, float width, Layout& out,
+                     const MathReveal& reveal) {
     out = Layout{};
     float y = 0;
     std::vector<int> numbers(doc.blocks.size(), 0); // ordered list numbers
@@ -403,7 +458,7 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
         y += metrics.pad_before;
 
         if (block.type == BlockType::Table) {
-            layout_table(block, static_cast<int>(bi), fonts, width, y, out);
+            layout_table(block, static_cast<int>(bi), fonts, width, y, out, reveal);
             y += metrics.pad_after;
             continue;
         }
@@ -446,6 +501,7 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
                 y += sz.h;
             } else {
                 // Code block: one layout line per source line, no wrapping.
+                y += kCodeHeaderH;
                 LineBuilder builder(static_cast<int>(bi), -1, 0, metrics, width);
                 builder.set_default_font(font_for(fonts, block, 0));
                 for (size_t ii = 0; ii < block.inlines.size(); ++ii) {
@@ -469,7 +525,7 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
             }
         } else {
             layout_text(block, block.inlines, static_cast<int>(bi), -1, 0, fonts, metrics,
-                        width, y, out);
+                        width, y, out, reveal);
         }
 
         const float box_bottom = y - metrics.leading;
@@ -497,6 +553,41 @@ bool operator<(const Pos& a, const Pos& b) {
     if (a.cell != b.cell) return a.cell < b.cell;
     if (a.inl != b.inl) return a.inl < b.inl;
     return a.offset < b.offset;
+}
+
+float file_icon_width(float zoom) {
+    return 22.0f * zoom;
+}
+
+float math_size(const Block& block, float zoom) {
+    return size_for(block) * zoom;
+}
+
+MathReveal math_reveal_at(const Document& doc, const Pos& caret) {
+    MathReveal none;
+    if (caret.block < 0 || caret.block >= static_cast<int>(doc.blocks.size())) return none;
+    const Block& block = doc.blocks[caret.block];
+    if (block.type == BlockType::CodeBlock || block.type == BlockType::Rule) return none;
+    const std::vector<Inline>& inls = inlines_of(block, caret.cell);
+    for (int ii = 0; ii < static_cast<int>(inls.size()); ++ii) {
+        const Inline& inl = inls[ii];
+        if (inl.style & StyleCode) continue;
+        const std::string& text = inl.text;
+        for (int pos = 0; pos < static_cast<int>(text.size());) {
+            if (text[pos] == '$' && (pos == 0 || text[pos - 1] == ' ')) {
+                const int close = find_math_close(text, pos);
+                if (close > 0) {
+                    if (caret.inl == ii && caret.offset > pos && caret.offset <= close) {
+                        return MathReveal{caret.block, caret.cell, ii, pos, close + 1};
+                    }
+                    pos = close + 1;
+                    continue;
+                }
+            }
+            pos = next_char(text, pos);
+        }
+    }
+    return none;
 }
 
 Pos hit_test(const Document& doc, const Layout& layout, FontBook& fonts, float x, float y) {
@@ -534,6 +625,11 @@ Pos hit_test(const Document& doc, const Layout& layout, FontBook& fonts, float x
 
     for (const Span& span : line->spans) {
         if (x >= span.x + span.width) continue;
+        if (span.math) {
+            // A formula is one unit: the caret goes to whichever side is closer.
+            const bool left = x < span.x + span.width / 2.0f;
+            return Pos{line->block, span.inl, left ? span.byte_begin : span.byte_end, line->cell};
+        }
         const Inline& inl = inls[span.inl];
         TTF_Font* font = font_for(fonts, block, inl.style | line->extra_style);
 
@@ -573,6 +669,10 @@ int locate_caret(const Document& doc, const Layout& layout, FontBook& fonts,
         for (const Span& span : line.spans) {
             if (span.inl != pos.inl) continue;
             if (pos.offset >= span.byte_begin && pos.offset < span.byte_end) {
+                if (span.math) {
+                    *x_out = span.x;
+                    return static_cast<int>(i);
+                }
                 const Inline& inl = inls[span.inl];
                 TTF_Font* font = font_for(fonts, block, inl.style | line.extra_style);
                 *x_out = span.x + measure(font, inl.text, span.byte_begin, pos.offset);

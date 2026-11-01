@@ -5,10 +5,11 @@
 #include <map>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace md {
 
-enum class Family { Sans = 0, Mono = 1 };
+enum class Family { Sans = 0, Mono = 1, Serif = 2 };
 
 // Loads font faces on demand and caches them by (family, bold, italic, strike, size).
 // Owns every TTF_Font it returns.
@@ -28,6 +29,8 @@ private:
     std::string dir_;
     float zoom_ = 1.0f;
     std::map<std::tuple<int, bool, bool, bool, int>, TTF_Font*> cache_;
+    // Fallback faces (arrows, superscripts) shared by every face of one size and style.
+    std::map<std::tuple<bool, bool, bool, int>, std::vector<TTF_Font*>> fallbacks_;
 };
 
 } // namespace md

@@ -391,6 +391,33 @@ void Editor::insert_piece(const std::string& piece) {
     caret_.offset += static_cast<int>(piece.size());
 }
 
+void Editor::insert_link(const std::string& text, const std::string& href, bool image) {
+    if (text.empty()) return;
+    if (has_selection()) delete_selection();
+    Block& target = doc_.blocks[caret_.block];
+    if (target.type == BlockType::Rule) {
+        target.type = BlockType::Paragraph;
+    }
+    pending_ = false;
+    std::vector<Inline>& inls = cont(caret_);
+    const int k = caret_.inl;
+    const Inline old = inls[k];
+    const int off = caret_.offset;
+
+    std::vector<Inline> parts;
+    if (off > 0) parts.push_back(Inline{old.text.substr(0, off), old.style, old.href});
+    const int fresh = k + static_cast<int>(parts.size());
+    parts.push_back(Inline{text, static_cast<std::uint8_t>(StyleLink | (image ? StyleImage : 0)), href});
+    if (off < static_cast<int>(old.text.size())) {
+        parts.push_back(Inline{old.text.substr(off), old.style, old.href});
+    }
+    inls.erase(inls.begin() + k);
+    inls.insert(inls.begin() + k, parts.begin(), parts.end());
+    caret_ = Pos{caret_.block, fresh, static_cast<int>(text.size()), caret_.cell};
+    anchor_ = caret_;
+    blink_tick = SDL_GetTicks();
+}
+
 void Editor::newline() {
     pending_ = false;
     if (in_table()) {
@@ -683,6 +710,81 @@ void Editor::set_block(BlockType type, int level, bool ordered) {
     }
     pending_ = false;
     blink_tick = SDL_GetTicks();
+}
+
+bool Editor::code_tab(bool outdent) {
+    if (caret_.block < 0 || caret_.block >= static_cast<int>(doc_.blocks.size())) return false;
+    if (doc_.blocks[caret_.block].type != BlockType::CodeBlock) return false;
+    if (anchor_.block != caret_.block || anchor_.cell != caret_.cell || anchor_.inl != caret_.inl) {
+        return false;
+    }
+    std::vector<Inline>& inls = cont(caret_);
+    if (caret_.inl < 0 || caret_.inl >= static_cast<int>(inls.size())) return false;
+    std::string& text = inls[static_cast<size_t>(caret_.inl)].text;
+    const int size = static_cast<int>(text.size());
+    const int s = std::min(anchor_.offset, caret_.offset);
+    const int e = std::max(anchor_.offset, caret_.offset);
+    // A caret or a selection within one line is replaced by four spaces.
+    const size_t newline = text.find('\n', static_cast<size_t>(s));
+    if (!outdent && (newline == std::string::npos || newline >= static_cast<size_t>(e))) {
+        insert_text("    ");
+        return true;
+    }
+    auto line_start = [&](int pos) {
+        while (pos > 0 && text[static_cast<size_t>(pos - 1)] != '\n') --pos;
+        return pos;
+    };
+
+    // Lines covered by the selection; a selection that ends at the start of a line
+    // leaves that line out.
+    std::vector<int> starts{line_start(s)};
+    for (int i = starts[0]; i < size; ++i) {
+        if (text[static_cast<size_t>(i)] != '\n') continue;
+        const int next = i + 1;
+        if (next > e || (next == e && e > s)) break;
+        starts.push_back(next);
+    }
+
+    // Edit from the last line backwards, so the earlier line starts stay valid.
+    std::vector<std::pair<int, int>> changes; // line start, signed change in length
+    for (auto it = starts.rbegin(); it != starts.rend(); ++it) {
+        const int at = *it;
+        if (!outdent) {
+            text.insert(static_cast<size_t>(at), "    ");
+            changes.emplace_back(at, 4);
+        } else {
+            int n = 0;
+            if (at < static_cast<int>(text.size()) && text[static_cast<size_t>(at)] == '\t') {
+                n = 1;
+            } else {
+                while (n < 4 && at + n < static_cast<int>(text.size()) && text[static_cast<size_t>(at + n)] == ' ') ++n;
+            }
+            if (n == 0) continue;
+            text.erase(static_cast<size_t>(at), static_cast<size_t>(n));
+            changes.emplace_back(at, -n);
+        }
+    }
+    if (changes.empty()) return false;
+
+    auto shift = [&](int pos) {
+        int result = pos;
+        for (const auto& [at, delta] : changes) {
+            if (delta > 0) {
+                if (pos >= at) result += delta;
+            } else if (pos > at) {
+                result -= std::min(-delta, pos - at);
+            }
+        }
+        return result;
+    };
+    const int new_caret = shift(caret_.offset);
+    const int new_anchor = shift(anchor_.offset);
+    caret_.offset = new_caret;
+    anchor_.offset = new_anchor;
+    goal_x_ = -1.0f;
+    pending_ = false;
+    blink_tick = SDL_GetTicks();
+    return true;
 }
 
 bool Editor::indent(int delta) {

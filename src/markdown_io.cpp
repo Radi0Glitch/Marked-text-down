@@ -68,6 +68,12 @@ std::string attr_string(const MD_ATTRIBUTE& a) {
     return a.text ? std::string(a.text, a.size) : std::string();
 }
 
+// The file name at the end of a link target, without its folders.
+std::string base_name(const std::string& path) {
+    const size_t cut = path.find_last_of("/\\");
+    return cut == std::string::npos ? path : path.substr(cut + 1);
+}
+
 struct Importer {
     Document& doc;
     std::vector<bool> lists;  // ordered flag of every open list
@@ -78,7 +84,8 @@ struct Importer {
     std::vector<Inline>* sink = nullptr;                // cell receiving text, if any
     int cur = -1;             // block that receives inline text, -1 for none
     bool item_open = false;   // list item still waiting for its first paragraph
-    int bold = 0, italic = 0, code = 0, strike = 0, link = 0;
+    int bold = 0, italic = 0, code = 0, strike = 0, link = 0, image = 0;
+    int image_text = 0; // bytes of text seen inside the open image
     std::string href;
 
     explicit Importer(Document& d) : doc(d) {}
@@ -89,7 +96,8 @@ struct Importer {
         if (italic) s |= StyleItalic;
         if (code) s |= StyleCode;
         if (strike) s |= StyleStrike;
-        if (link) s |= StyleLink;
+        if (link || image) s |= StyleLink;
+        if (image) s |= StyleImage;
         return s;
     }
 
@@ -104,6 +112,7 @@ struct Importer {
 
     void append(const char* s, size_t n) {
         if (n == 0) return;
+        if (image > 0) image_text += static_cast<int>(n);
         std::vector<Inline>* target = sink;
         if (!target) {
             if (cur < 0) {
@@ -116,7 +125,7 @@ struct Importer {
         }
 
         const std::uint8_t st = style();
-        const std::string h = link > 0 ? href : std::string();
+        const std::string h = (link > 0 || image > 0) ? href : std::string();
         Inline& last = target->back();
         if (last.style == st && last.href == h) {
             last.text.append(s, n);
@@ -292,6 +301,13 @@ int on_enter_span(MD_SPANTYPE type, void* detail, void* ud) {
             ++im.link;
             break;
         }
+        case MD_SPAN_IMG: {
+            const auto* img = static_cast<const MD_SPAN_IMG_DETAIL*>(detail);
+            if (im.link == 0 && im.image == 0 && img) im.href = attr_string(img->src);
+            ++im.image;
+            im.image_text = 0;
+            break;
+        }
         default:
             break;
     }
@@ -306,7 +322,15 @@ int on_leave_span(MD_SPANTYPE type, void* /*detail*/, void* ud) {
         case MD_SPAN_CODE: --im.code; break;
         case MD_SPAN_DEL: --im.strike; break;
         case MD_SPAN_A:
-            if (--im.link == 0) im.href.clear();
+            if (--im.link == 0 && im.image == 0) im.href.clear();
+            break;
+        case MD_SPAN_IMG:
+            if (im.image_text == 0) {
+                // An image without alt text is named after its file.
+                const std::string name = base_name(im.href);
+                im.append(name.data(), name.size());
+            }
+            if (--im.image == 0 && im.link == 0) im.href.clear();
             break;
         default:
             break;
@@ -368,12 +392,13 @@ struct Marks {
     bool bold = false;
     bool italic = false;
     bool strike = false;
+    bool image = false;
     std::string href;
 };
 
 bool same(const Marks& a, const Marks& b) {
     return a.bold == b.bold && a.italic == b.italic && a.strike == b.strike
-        && a.href == b.href;
+        && a.image == b.image && a.href == b.href;
 }
 
 Marks marks_of(const Inline& inl, bool gfm) {
@@ -381,13 +406,16 @@ Marks marks_of(const Inline& inl, bool gfm) {
     m.bold = inl.style & StyleBold;
     m.italic = inl.style & StyleItalic;
     m.strike = gfm && (inl.style & StyleStrike);
-    if (inl.style & StyleLink) m.href = inl.href;
+    if (inl.style & StyleLink) {
+        m.href = inl.href;
+        m.image = inl.style & StyleImage;
+    }
     return m;
 }
 
 std::string opening(const Marks& m) {
     std::string s;
-    if (!m.href.empty()) s += "[";
+    if (!m.href.empty()) s += m.image ? "![" : "[";
     if (m.bold) s += "**";
     if (m.italic) s += "*";
     if (m.strike) s += "~~";

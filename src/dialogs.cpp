@@ -11,6 +11,11 @@ std::string open_markdown() {
     return path ? path : "";
 }
 
+std::string open_any_file() {
+    const char* path = tinyfd_openFileDialog("Выбрать файл", "", 0, nullptr, nullptr, 0);
+    return path ? path : "";
+}
+
 std::string save_markdown(const std::string& suggested_name) {
     char const* filters[] = {"*.md"};
     const char* path = tinyfd_saveFileDialog("Сохранить как", suggested_name.c_str(), 1,

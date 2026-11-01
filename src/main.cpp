@@ -81,6 +81,7 @@ static const PTemplate kChartTemplates[] = {
 #include "diag_draw.hpp"
 #include "diag_model.hpp"
 #include "dialogs.hpp"
+#include "window_state.hpp"
 #include "document.hpp"
 #include "editor.hpp"
 #include "fontbook.hpp"
@@ -224,6 +225,25 @@ const std::vector<std::string> kDialects = {
     "GitHub Flavored Markdown",
 };
 
+// Languages offered by the menu on code blocks. The value is what follows the opening fence.
+struct CodeLang {
+    const char* value;
+    const char* label;
+};
+
+const CodeLang kCodeLangs[] = {
+    {"", ""}, // the first entry clears the language; its label is translated at runtime
+    {"python", "Python"}, {"javascript", "JavaScript"}, {"typescript", "TypeScript"},
+    {"java", "Java"}, {"c", "C"}, {"cpp", "C++"}, {"csharp", "C#"}, {"go", "Go"},
+    {"rust", "Rust"}, {"php", "PHP"}, {"sql", "SQL"}, {"bash", "Bash"}, {"json", "JSON"},
+    {"html", "HTML"}, {"css", "CSS"},
+};
+
+// Formulas, diagrams and charts are code blocks too, but their language sets their type.
+bool is_visual_lang(const std::string& lang) {
+    return lang == "math" || lang == "latex" || lang == "tex" || md::is_diagram_lang(lang);
+}
+
 const std::vector<std::string> kFileItemsRu = {
     "Новый   Ctrl+N",
     "Открыть...   Ctrl+O",
@@ -231,6 +251,7 @@ const std::vector<std::string> kFileItemsRu = {
     "Сохранить как...   Ctrl+Shift+S",
     "О редакторе и возможностях",
     "Оглавление   Ctrl+Shift+T",
+    "Экспорт   ›",
 };
 
 const std::vector<std::string> kFileItemsEn = {
@@ -240,6 +261,7 @@ const std::vector<std::string> kFileItemsEn = {
     "Save As...   Ctrl+Shift+S",
     "Welcome & Features",
     "Outline   Ctrl+Shift+T",
+    "Export   ›",
 };
 
 std::string data_file(const std::string& name) {
@@ -279,8 +301,7 @@ std::string fit_text(TTF_Font* font, std::string text, float max_w) {
 }
 
 struct App {
-    static constexpr float kTitleH = 36.0f;
-    static constexpr float kTabH = 28.0f;
+    static constexpr float kTitleH = 44.0f;
     int ctx_menu_block = -1;
     std::string ctx_menu_lang;
     float ctx_menu_x = 0, ctx_menu_y = 0;
@@ -318,19 +339,19 @@ struct App {
     ui::Fonts fonts;
     ui::Context ui;
     md::FontBook fontbook;
+    TTF_Font* heading_fonts[3] = {nullptr, nullptr, nullptr}; // H1, H2, H3 button labels
     md::Document doc;
     md::Editor editor{doc};
     md::Layout layout;
     md::History history;
     float toolbar_h = 52.0f;
     ui::Rect file_rect{};
+    bool file_export_mode = false; // the File menu shows the export formats instead
     ui::Rect dialect_rect{};
     ui::Rect theme_rect{};
     ui::Rect lang_rect{};
     ui::Rect help_rect{};
     ui::Rect caption_rects[3]{}; // minimize, maximize, close
-    int tools_tab = 0;           // 0 = Главная, 1 = Таблица, 2 = Дополнения
-    ui::Rect tab_rects[4]{};
     ui::Rect doc_viewport{};
     ui::Rect scrollbar_track{};
     ui::Rect scrollbar_thumb{};
@@ -342,7 +363,20 @@ struct App {
     float scroll_y = 0;
     float laid_out_width = -1;
     float laid_out_zoom = -1; // zoom that `layout` was built with
+    md::MathReveal math_reveal_shown; // formula shown as source in `layout`
     float zoom = 1.0f;        // document zoom, 0.5 … 2.0
+    // Window placement kept between runs; see winstate. Only the restored rectangle is stored.
+    winstate::Geometry geometry;
+    bool geometry_known = false;
+    bool geometry_dirty = false;
+    Uint64 geometry_tick = 0;
+    // Link dialog, opened by Ctrl+K or the toolbar button.
+    bool link_open = false;
+    int link_field = 0; // 0 = text, 1 = address
+    std::string link_text_value;
+    std::string link_href_value;
+    ui::Rect link_card{}, link_text_box{}, link_href_box{};
+    SDL_Cursor* hand_cursor = nullptr;
     float max_scroll = 0;
 
     // Pending zoom anchor: the document point that should stay under the
@@ -397,11 +431,32 @@ struct App {
     bool en() const { return ui_lang == 1; }
     const char* tr(const char* ru, const char* en_str) const { return en() ? en_str : ru; }
 
+    // Takes the window's placement; a maximized window keeps the rectangle it was restored to.
+    void remember_window() {
+        winstate::Geometry g;
+        if (!window || selftest_mode || !winstate::read(window, g)) return;
+        geometry.maximized = g.maximized;
+        if (g.has_rect) {
+            geometry = g;
+            geometry_known = true;
+        }
+    }
+
     void save_settings() {
+        if (selftest_mode) return; // test runs must not change the user's settings
+        remember_window();
         std::string content;
         content += "show_welcome=" + std::string(show_welcome_on_startup ? "1" : "0") + "\n";
         content += "lang=" + std::string(ui_lang == 1 ? "en" : "ru") + "\n";
         content += "theme=" + std::string(light_theme ? "light" : "dark") + "\n";
+        if (geometry_known) {
+            content += "win_x=" + std::to_string(geometry.x) + "\n";
+            content += "win_y=" + std::to_string(geometry.y) + "\n";
+            content += "win_w=" + std::to_string(geometry.w) + "\n";
+            content += "win_h=" + std::to_string(geometry.h) + "\n";
+            content += "win_max=" + std::string(geometry.maximized ? "1" : "0") + "\n";
+        }
+        content += "zoom=" + std::to_string(static_cast<int>(zoom * 100.0f + 0.5f)) + "\n";
         for (const std::string& path : recent_files) content += "recent=" + path + "\n";
         md::write_text_file(settings_file_path(), content);
     }
@@ -420,6 +475,17 @@ struct App {
             else if (line == "theme=dark") light_theme = false;
             else if (line.rfind("recent=", 0) == 0 && recent_files.size() < kMaxRecent) {
                 recent_files.push_back(line.substr(7));
+            } else if (!selftest_mode && line.rfind("win_", 0) == 0 && line.find('=') != std::string::npos) {
+                const std::string key = line.substr(0, line.find('='));
+                const int value = std::atoi(line.c_str() + key.size() + 1);
+                if (key == "win_x") geometry.x = value;
+                else if (key == "win_y") geometry.y = value;
+                else if (key == "win_w") geometry.w = value;
+                else if (key == "win_h") geometry.h = value;
+                else if (key == "win_max") geometry.maximized = value != 0;
+                geometry_known = true;
+            } else if (!selftest_mode && line.rfind("zoom=", 0) == 0) {
+                zoom = std::clamp(std::atoi(line.c_str() + 5) / 100.0f, 0.5f, 2.0f);
             }
         }
     }
@@ -677,7 +743,7 @@ struct App {
         add_recent(path);
         find_matches.clear();
         find_current = -1;
-        status = std::string(tr("Открыто: ", "Opened: ")) + document_name() + " (" + kDialects[dialect] + ")";
+        status = std::string(tr("Открыто: ", "Opened: ")) + document_name();
         update_title();
         return OpenResult::Opened;
     }
@@ -686,6 +752,32 @@ struct App {
         const std::string path = dialogs::open_markdown();
         if (path.empty()) return;
         open_from_path(path, false, true);
+    }
+
+    // Index into the export formats offered in the File menu.
+    void export_format(size_t index) {
+        struct Fmt { const char* label; const char* ext; const char* filter; const char* to; };
+        static const Fmt fmts[] = {
+            {"DOCX", "document.docx", "*.docx", "docx"},
+            {"PDF",  "document.pdf",  "*.pdf",  "pdf"},
+            {"HTML", "document.html", "*.html", "html5"},
+            {"ODT",  "document.odt",  "*.odt",  "odt"},
+            {"EPUB", "document.epub", "*.epub", "epub"},
+        };
+        if (index >= sizeof(fmts) / sizeof(fmts[0])) return;
+        const Fmt& f = fmts[index];
+        if (!has_pandoc || pandoc_path.empty()) {
+            dialogs::show_error(tr("Pandoc не найден", "Pandoc not found"));
+            return;
+        }
+        const std::string out = dialogs::save_export(f.ext, f.filter, f.label);
+        if (out.empty()) return;
+        if (export_with_pandoc(f.to, out)) {
+            dialogs::show_info(tr("Экспорт", "Export"), tr("Файл экспортирован", "File exported"));
+            status = std::string(tr("Экспортировано: ", "Exported: ")) + f.label;
+        } else {
+            dialogs::show_error(tr("Ошибка экспорта через Pandoc", "Pandoc export failed"));
+        }
     }
 
     bool export_with_pandoc(const std::string& to_fmt, const std::string& out_path) {
@@ -747,6 +839,7 @@ struct App {
             std::fprintf(stderr, "TTF_Init: %s\n", SDL_GetError());
             return false;
         }
+        load_settings();
         window = SDL_CreateWindow("Marked-text-down", 1100, 720,
                                   SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
         if (!window) {
@@ -757,11 +850,16 @@ struct App {
         SDL_SetWindowBordered(window, false);
         SDL_SetWindowMinimumSize(window, 560, 400);
         SDL_SetWindowHitTest(window, hit_test, this);
+        // Last: SDL's own setup above would otherwise move the window back to its remembered rectangle.
+        if (geometry_known && !selftest_mode && winstate::usable(geometry)) {
+            winstate::apply(window, geometry);
+        }
         renderer = SDL_CreateRenderer(window, nullptr);
         if (!renderer) {
             std::fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
             return false;
         }
+        hand_cursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
         SDL_SetRenderVSync(renderer, 1);
         {
             SDL_DisplayID did = SDL_GetDisplayForWindow(window);
@@ -792,6 +890,10 @@ struct App {
         fonts.bold_italic = fontbook.get(md::Family::Sans, true, true, 15.0f);
         fonts.strike = fontbook.get(md::Family::Sans, false, false, 15.0f, true);
         fonts.mono = fontbook.get(md::Family::Mono, false, false, 14.0f);
+        // Heading buttons get three sizes so H1, H2 and H3 are easy to tell apart.
+        heading_fonts[0] = fontbook.get(md::Family::Sans, true, false, 19.0f);
+        heading_fonts[1] = fontbook.get(md::Family::Sans, true, false, 16.0f);
+        heading_fonts[2] = fontbook.get(md::Family::Sans, true, false, 13.0f);
         doc = md::make_demo_document();
         pandoc_path = find_pandoc_path();
         if (!pandoc_path.empty()) {
@@ -803,7 +905,6 @@ struct App {
 
         ui.renderer = renderer;
         ui.fonts = &fonts;
-        load_settings();
         ui.palette = light_theme ? ui::light_palette() : ui::dark_palette();
         welcome_open = show_welcome_on_startup;
         status = tr("Готово", "Ready");
@@ -812,7 +913,9 @@ struct App {
     }
 
     void shutdown() {
+        save_settings();
         fontbook.clear();
+        if (hand_cursor) SDL_DestroyCursor(hand_cursor);
         if (renderer) SDL_DestroyRenderer(renderer);
         if (window) SDL_DestroyWindow(window);
         TTF_Quit();
@@ -865,84 +968,70 @@ struct App {
 
     // Tab strip under the title row. The table tab is locked unless the dialect
     // supports tables.
-    void draw_tabs() {
-        using namespace ui;
-        const float h = 24.0f;
-        const float y = kTitleH + (kTabH - h) / 2.0f;
-        const bool tables_ok = gfm();
-        if (!tables_ok && tools_tab == 1) tools_tab = 0;
-
-        const char* labels[3] = {
-            tr("Главная", "Home"),
-            tr("Таблица", "Table"),
-            tr("Дополнения", "Extras")
-        };
-        float x = 8.0f;
-        for (int i = 0; i < 3; ++i) {
-            bool enabled = true;
-            if (i == 1) enabled = tables_ok;
-            const float w = text_width(fonts.regular, labels[i]) + 36.0f;
-            if (static_cast<size_t>(i) < sizeof(tab_rects) / sizeof(tab_rects[0])) {
-                tab_rects[i] = Rect{x, y, w, h};
-            }
-            const char* ids[3] = {"tab_main", "tab_table", "tab_extra"};
-            const bool clicked = tab_button(ui, ids[i], Rect{x, y, w, h},
-                                            labels[i], tools_tab == i, enabled);
-            if (clicked) tools_tab = i;
-            x += w + 4.0f;
-        }
-
-        if (!tables_ok && width - x > 120.0f) {
-            const std::string hint = fit_text(fonts.regular,
-                tr("Таблицы доступны в диалекте GitHub Flavored Markdown",
-                   "Tables are available in GitHub Flavored Markdown dialect"),
-                static_cast<float>(width) - x - 24.0f);
-            ui::draw_text(ui, fonts.regular, hint,
-                      x + 12.0f, y + (h - text_height(fonts.regular)) / 2.0f, ui.palette.text_dim);
-        }
-    }
-
-    // Title row: File menu on the left, document name in the middle, dialect and
-    // window controls on the right. The two corner groups never share space.
-    // Items flow left to right and wrap onto new rows when the window is too
-    // narrow. The first pass only counts rows, so the bar height is known before
-    // it is painted; the second pass draws and handles clicks.
+    // Title row on top, then one centred formatting row. Inside a table the row
+    // shows the table tools instead. Narrow windows wrap the row onto more lines.
     void draw_toolbar() {
         using namespace ui;
-        const float pad = 10.0f;
-        const float btn_h = 32.0f;
-        const float row_gap = 6.0f;
+        const float pad = 14.0f;
+        const float btn_h = 30.0f;
+        const float row_step = btn_h + 8.0f;
         const float right = static_cast<float>(width) - pad;
+        const float top = kTitleH + 8.0f;
+        const bool tables_ok = gfm();
 
-        const float top = kTitleH + kTabH + pad;
-
+        std::vector<float> row_ends; // right edge of each row, measured in the first pass
         bool measuring = true;
         int row = 0;
+        float row_start = pad;
         float x = pad;
         float y = top;
 
+        auto row_origin = [&](int r) {
+            float offset = 0.0f;
+            if (!measuring && static_cast<size_t>(r) < row_ends.size()) {
+                offset = std::max(0.0f, (static_cast<float>(width) - 2.0f * pad
+                                         - (row_ends[static_cast<size_t>(r)] - pad)) / 2.0f);
+            }
+            return pad + offset;
+        };
         auto place = [&](float w) {
-            if (x > pad && x + w > right) {
+            if (x > row_start && x + w > right) {
+                if (measuring) row_ends.push_back(x - 2.0f);
                 ++row;
-                x = pad;
-                y = top + row * (btn_h + row_gap);
+                row_start = row_origin(row);
+                x = row_start;
+                y = top + row * row_step;
             }
             const Rect r{x, y, w, btn_h};
-            x += w + 6.0f;
+            x += w + 2.0f;
             return r;
         };
         auto place_label = [&](const char* label, TTF_Font* font = nullptr) {
             TTF_Font* f = font ? font : fonts.regular;
-            return place(std::max(34.0f, text_width(f, label) + 28.0f));
+            return place(std::max(30.0f, text_width(f, label) + 12.0f));
         };
         auto sep = [&]() {
-            if (!measuring) ui::separator(ui, {x + 2.0f, y + 4.0f, 1.0f, btn_h - 8.0f});
-            x += 12.0f;
+            if (!measuring) ui::separator(ui, {x + 4.0f, y + 8.0f, 1.0f, btn_h - 16.0f});
+            x += 10.0f;
+        };
+
+        auto insert_template = [&](const PTemplate& t) {
+            md::Block b;
+            b.type = md::BlockType::CodeBlock;
+            b.lang = t.lang;
+            b.inlines.clear();
+            b.inlines.push_back(md::Inline{std::string(en() ? t.text_en : t.text_ru), 0, ""});
+            doc.blocks.insert(doc.blocks.begin() + editor.caret().block + 1, std::move(b));
+            doc_dirty = true;
+            mark_edited();
+            editor.set_caret(md::Pos{editor.caret().block + 1, 0, 0, -1});
+            history.commit(doc, editor.caret(), editor.anchor(), md::EditKind::Other);
         };
 
         auto body = [&]() {
             row = 0;
-            x = pad;
+            row_start = row_origin(0);
+            x = row_start;
             y = top;
 
             auto widget_button = [&](const char* id, const char* label, bool enabled = true) {
@@ -955,148 +1044,7 @@ struct App {
                 return !measuring && ui::toggle_button(ui, id, r, label, active, enabled, font);
             };
 
-            if (tools_tab == 1) {
-                const bool in_table = editor.in_table();
-                if (widget_button("tbl_insert", tr("Вставить таблицу", "Insert Table"))) {
-                    editor.insert_table(3, 2);
-                    mark_edited();
-                }
-                sep();
-                if (widget_button("tbl_row_add", tr("+ строка", "+ Row"), in_table)) {
-                    editor.table_add_row();
-                    mark_edited();
-                }
-                if (widget_button("tbl_row_del", tr("- строка", "- Row"), in_table)) {
-                    editor.table_remove_row();
-                    mark_edited();
-                }
-                if (widget_button("tbl_col_add", tr("+ столбец", "+ Column"), in_table)) {
-                    editor.table_add_column();
-                    mark_edited();
-                }
-                if (widget_button("tbl_col_del", tr("- столбец", "- Column"), in_table)) {
-                    editor.table_remove_column();
-                    mark_edited();
-                }
-                sep();
-
-                const md::TableAlign align = editor.table_align();
-                auto align_button = [&](const char* id, const char* label, md::TableAlign a) {
-                    if (widget_toggle(id, label, in_table && align == a, in_table)) {
-                        editor.table_set_align(a);
-                        mark_edited();
-                    }
-                };
-                align_button("tbl_al_left", tr("Слева", "Left"), md::TableAlign::Left);
-                align_button("tbl_al_center", tr("По центру", "Center"), md::TableAlign::Center);
-                align_button("tbl_al_right", tr("Справа", "Right"), md::TableAlign::Right);
-                sep();
-
-                if (widget_button("tbl_remove", tr("Удалить таблицу", "Delete Table"), in_table)) {
-                    editor.table_remove();
-                    mark_edited();
-                }
-                return;
-            }
-
-            if (tools_tab == 2) {
-                if (widget_button("vis_formula", tr("Новая формула", "New Formula"))) {
-                    formula_open_new();
-                }
-                if (widget_button("vis_diag", tr("Новая диаграмма", "New Diagram"))) {
-                    diag_open_new();
-                }
-                if (widget_button("vis_chart", tr("Новый график", "New Chart"))) {
-                    chart_open_new();
-                }
-                sep();
-
-                auto insert_template = [&](const PTemplate& t) {
-                    md::Block b;
-                    b.type = md::BlockType::CodeBlock;
-                    b.lang = t.lang;
-                    b.inlines.clear();
-                    b.inlines.push_back(md::Inline{std::string(en() ? t.text_en : t.text_ru), 0, ""});
-                    doc.blocks.insert(doc.blocks.begin() + editor.caret().block + 1, std::move(b));
-                    doc_dirty = true;
-                    mark_edited();
-                    editor.set_caret(md::Pos{editor.caret().block + 1, 0, 0, -1});
-                    history.commit(doc, editor.caret(), editor.anchor(), md::EditKind::Other);
-                };
-                {
-                    std::vector<std::string> items;
-                    items.reserve(sizeof(kMathTemplates) / sizeof(kMathTemplates[0]));
-                    for (const auto& t : kMathTemplates) items.push_back(en() ? t.label_en : t.label_ru);
-                    const char* lbl = tr("Шаблоны формул", "Formula Templates");
-                    const Rect r = place_label(lbl);
-                    const int ch = !measuring ? ui::menu(ui, "pandoc_math_menu", r, lbl, items, 260.0f) : -1;
-                    if (ch >= 0) insert_template(kMathTemplates[ch]);
-                }
-                {
-                    std::vector<std::string> items;
-                    items.reserve(sizeof(kDiagramTemplates) / sizeof(kDiagramTemplates[0]));
-                    for (const auto& t : kDiagramTemplates) items.push_back(en() ? t.label_en : t.label_ru);
-                    const char* lbl = tr("Шаблоны диаграмм", "Diagram Templates");
-                    const Rect r = place_label(lbl);
-                    const int ch = !measuring ? ui::menu(ui, "pandoc_diag_menu", r, lbl, items, 280.0f) : -1;
-                    if (ch >= 0) insert_template(kDiagramTemplates[ch]);
-                }
-                {
-                    std::vector<std::string> items;
-                    items.reserve(sizeof(kChartTemplates) / sizeof(kChartTemplates[0]));
-                    for (const auto& t : kChartTemplates) items.push_back(en() ? t.label_en : t.label_ru);
-                    const char* lbl = tr("Шаблоны графиков", "Chart Templates");
-                    const Rect r = place_label(lbl);
-                    const int ch = !measuring ? ui::menu(ui, "pandoc_chart_menu", r, lbl, items, 240.0f) : -1;
-                    if (ch >= 0) insert_template(kChartTemplates[ch]);
-                }
-                sep();
-                {
-                    const char* lbl = tr("Справка о дополнениях", "Extensions Help");
-                    const Rect r = place_label(lbl);
-                    if (!measuring && ui::button(ui, "pandoc_help_btn", r, lbl)) {
-                        pandoc_help_open = true;
-                    }
-                }
-                sep();
-                {
-                    struct Fmt { const char* label; const char* ext; const char* filter; const char* to; };
-                    static const Fmt fmts[] = {
-                        {"DOCX", "document.docx", "*.docx", "docx"},
-                        {"PDF",  "document.pdf",  "*.pdf",  "pdf"},
-                        {"HTML", "document.html", "*.html", "html5"},
-                        {"ODT",  "document.odt",  "*.odt",  "odt"},
-                        {"EPUB", "document.epub", "*.epub", "epub"},
-                    };
-                    std::vector<std::string> items;
-                    for (const auto& f : fmts) items.push_back(f.label);
-                    const char* lbl = tr("Экспорт...", "Export...");
-                    const Rect r = place_label(lbl);
-                    const int ch = !measuring ? ui::menu(ui, "pandoc_export_menu", r, lbl, items, 160.0f) : -1;
-                    if (ch >= 0 && ch < (int)(sizeof(fmts)/sizeof(fmts[0]))) {
-                        if (has_pandoc && !pandoc_path.empty()) {
-                            std::string out = dialogs::save_export(fmts[ch].ext, fmts[ch].filter, fmts[ch].label);
-                            if (!out.empty()) {
-                                if (export_with_pandoc(fmts[ch].to, out)) {
-                                    dialogs::show_info(tr("Экспорт", "Export"), tr("Файл экспортирован", "File exported"));
-                                    status = std::string(tr("Экспортировано: ", "Exported: ")) + fmts[ch].label;
-                                } else {
-                                    dialogs::show_error(tr("Ошибка экспорта через Pandoc", "Pandoc export failed"));
-                                }
-                            }
-                        } else {
-                            dialogs::show_error(tr("Pandoc не найден", "Pandoc not found"));
-                        }
-                    }
-                }
-                return;
-            }
-
-            // Главная / Home
-            if (widget_button("undo", tr("Отменить", "Undo"))) apply_history(false);
-            if (widget_button("redo", tr("Повторить", "Redo"))) apply_history(true);
-            sep();
-
+            // Formatting is always available, also inside tables.
             const unsigned style = editor.active_style();
             if (widget_toggle("bold", tr("Ж", "B"), style & md::StyleBold, true, fonts.bold)) {
                 editor.toggle_style(md::StyleBold);
@@ -1110,17 +1058,21 @@ struct App {
                 editor.toggle_style(md::StyleStrike);
                 mark_edited();
             }
-            if (widget_toggle("code", tr("Код", "Code"), style & md::StyleCode, true, fonts.mono)) {
+            if (widget_toggle("code", "</>", style & md::StyleCode, true, fonts.mono)) {
                 editor.toggle_style(md::StyleCode);
                 mark_edited();
+            }
+            if (widget_button("link", tr("Ссылка", "Link"))) {
+                link_open_dialog();
             }
             sep();
 
             const md::Block& cb = doc.blocks[editor.caret().block];
             const int cb_level = cb.level;
             auto block_button = [&](const char* id, const char* label, bool active,
-                                    md::BlockType t, int level, bool ordered) {
-                if (widget_toggle(id, label, active)) {
+                                    md::BlockType t, int level, bool ordered,
+                                    TTF_Font* font = nullptr) {
+                if (widget_toggle(id, label, active, true, font)) {
                     if (active) {
                         editor.set_block(md::BlockType::Paragraph, 0, false);
                     } else {
@@ -1130,40 +1082,101 @@ struct App {
                     ensure_caret_visible();
                 }
             };
-            block_button("h1", tr("Заг. 1", "H1"), cb.type == md::BlockType::Heading && cb_level == 1,
-                         md::BlockType::Heading, 1, false);
-            block_button("h2", tr("Заг. 2", "H2"), cb.type == md::BlockType::Heading && cb_level == 2,
-                         md::BlockType::Heading, 2, false);
-            block_button("h3", tr("Заг. 3", "H3"), cb.type == md::BlockType::Heading && cb_level == 3,
-                         md::BlockType::Heading, 3, false);
+            block_button("h1", "H₁", cb.type == md::BlockType::Heading && cb_level == 1,
+                         md::BlockType::Heading, 1, false, heading_fonts[0]);
+            block_button("h2", "H₂", cb.type == md::BlockType::Heading && cb_level == 2,
+                         md::BlockType::Heading, 2, false, heading_fonts[1]);
+            block_button("h3", "H₃", cb.type == md::BlockType::Heading && cb_level == 3,
+                         md::BlockType::Heading, 3, false, heading_fonts[2]);
             sep();
 
-            block_button("list", tr("• Список", "• List"), cb.type == md::BlockType::ListItem && !cb.ordered,
-                         md::BlockType::ListItem, 0, false);
-            block_button("olist", tr("1. Список", "1. List"), cb.type == md::BlockType::ListItem && cb.ordered,
-                         md::BlockType::ListItem, 0, true);
+            {
+                const std::vector<std::string> items = {tr("• Маркированный", "• Bulleted"),
+                                                        tr("1. Нумерованный", "1. Numbered")};
+                const char* lbl = tr("Список ↓", "List ↓");
+                const Rect r = place_label(lbl);
+                const int ch = !measuring ? ui::menu(ui, "list_menu", r, lbl, items, 220.0f) : -1;
+                if (ch == 0 || ch == 1) {
+                    const bool ordered = ch == 1;
+                    if (cb.type == md::BlockType::ListItem && cb.ordered == ordered) {
+                        editor.set_block(md::BlockType::Paragraph, 0, false);
+                    } else {
+                        editor.set_block(md::BlockType::ListItem, 0, ordered);
+                    }
+                    mark_edited();
+                    ensure_caret_visible();
+                }
+            }
             block_button("quote", tr("Цитата", "Quote"), cb.type == md::BlockType::Quote,
                          md::BlockType::Quote, 0, false);
-            block_button("codeblock", tr("Блок кода", "Code Block"), cb.type == md::BlockType::CodeBlock,
+            block_button("codeblock", tr("Блок кода", "Code block"), cb.type == md::BlockType::CodeBlock,
                          md::BlockType::CodeBlock, 0, false);
-            if (widget_button("rule", tr("Линия", "Rule"))) {
+            sep();
+
+            if (editor.in_table() && tables_ok) {
+                const std::vector<std::string> items = {
+                    tr("+ строка", "+ row"), tr("- строка", "- row"),
+                    tr("+ столбец", "+ column"), tr("- столбец", "- column"),
+                    tr("Выровнять слева", "Align left"), tr("Выровнять по центру", "Align center"),
+                    tr("Выровнять справа", "Align right"), tr("Удалить таблицу", "Delete table"),
+                };
+                const char* lbl = tr("Таблица ↓", "Table ↓");
+                const Rect r = place_label(lbl);
+                const int ch = !measuring ? ui::menu(ui, "table_menu", r, lbl, items, 240.0f) : -1;
+                if (ch == 0) editor.table_add_row();
+                if (ch == 1) editor.table_remove_row();
+                if (ch == 2) editor.table_add_column();
+                if (ch == 3) editor.table_remove_column();
+                if (ch == 4) editor.table_set_align(md::TableAlign::Left);
+                if (ch == 5) editor.table_set_align(md::TableAlign::Center);
+                if (ch == 6) editor.table_set_align(md::TableAlign::Right);
+                if (ch == 7) editor.table_remove();
+                if (ch >= 0) mark_edited();
+            } else if (widget_button("tbl_insert", tr("Таблица", "Table"), tables_ok)) {
+                editor.insert_table(3, 2);
+                mark_edited();
+            }
+            if (widget_button("vis_diag", tr("Диаграмма", "Diagram"))) diag_open_new();
+            if (widget_button("vis_formula", tr("Формула", "Formula"))) formula_open_new();
+            if (widget_button("vis_chart", tr("График", "Chart"))) chart_open_new();
+            sep();
+            if (widget_button("rule", tr("— Линия", "— Rule"))) {
                 editor.insert_rule();
                 mark_edited();
+            }
+            sep();
+
+            {
+                std::vector<std::string> items;
+                std::vector<const PTemplate*> picks;
+                for (const auto& t : kMathTemplates) {
+                    items.push_back(std::string(tr("Формула: ", "Formula: ")) + (en() ? t.label_en : t.label_ru));
+                    picks.push_back(&t);
+                }
+                for (const auto& t : kDiagramTemplates) {
+                    items.push_back(std::string(tr("Диаграмма: ", "Diagram: ")) + (en() ? t.label_en : t.label_ru));
+                    picks.push_back(&t);
+                }
+                for (const auto& t : kChartTemplates) {
+                    items.push_back(std::string(tr("График: ", "Chart: ")) + (en() ? t.label_en : t.label_ru));
+                    picks.push_back(&t);
+                }
+                const char* lbl = tr("Шаблоны ↓", "Templates ↓");
+                const Rect r = place_label(lbl);
+                const int ch = !measuring ? ui::menu(ui, "templates_menu", r, lbl, items, 300.0f) : -1;
+                if (ch >= 0) insert_template(*picks[static_cast<size_t>(ch)]);
             }
         };
 
         body();
+        row_ends.push_back(x - 2.0f);
         measuring = false;
         const int rows = row + 1;
-        toolbar_h = top + rows * (btn_h + row_gap) - row_gap + pad;
+        toolbar_h = top + (rows - 1) * row_step + btn_h + 8.0f;
 
-        ui::fill_rect(ui, {0, 0, static_cast<float>(width), toolbar_h}, ui.palette.panel_bg);
-        ui::fill_rect(ui, {0, kTitleH - 1.0f, static_cast<float>(width), 1.0f}, ui.palette.panel_border);
-        ui::fill_rect(ui, {0, kTitleH + kTabH - 1.0f, static_cast<float>(width), 1.0f},
-                      ui.palette.panel_border);
+        ui::fill_rect(ui, {0, 0, static_cast<float>(width), toolbar_h}, ui.palette.window_bg);
         ui::fill_rect(ui, {0, toolbar_h - 1.0f, static_cast<float>(width), 1.0f}, ui.palette.panel_border);
         draw_titlebar();
-        draw_tabs();
         body();
     }
 
@@ -1201,25 +1214,45 @@ struct App {
         const char* file_lbl = tr("Файл", "File");
         file_rect = Rect{pad, y, std::max(34.0f, text_width(fonts.regular, file_lbl) + 28.0f), h};
 
-        std::vector<std::string> file_items = en() ? kFileItemsEn : kFileItemsRu;
-        for (const std::string& path : recent_files) {
-            file_items.push_back("   " + std::filesystem::u8path(path).filename().u8string());
-        }
-        const int choice = menu(ui, "file", file_rect, file_lbl, file_items, 270.0f);
-        if (choice == 0) new_document();
-        if (choice == 1) open();
-        if (choice == 2) save();
-        if (choice == 3) save_as();
-        if (choice == 4) welcome_open = true;
-        if (choice == 5) toggle_outline();
-        if (choice >= 6 && choice - 6 < static_cast<int>(recent_files.size())) {
-            const std::string path = recent_files[static_cast<size_t>(choice - 6)];
-            if (open_from_path(path, false, true) == OpenResult::Error) {
-                recent_files.erase(std::remove(recent_files.begin(), recent_files.end(), path),
-                                   recent_files.end());
-                save_settings();
+        std::vector<std::string> file_items;
+        if (file_export_mode) {
+            file_items = {tr("← Назад", "< Back"), "DOCX", "PDF", "HTML", "ODT", "EPUB"};
+        } else {
+            file_items = en() ? kFileItemsEn : kFileItemsRu;
+            for (const std::string& path : recent_files) {
+                file_items.push_back("   " + std::filesystem::u8path(path).filename().u8string());
             }
         }
+        const int choice = menu(ui, "file", file_rect, file_lbl, file_items, 270.0f);
+        if (file_export_mode) {
+            if (choice == 0) {
+                file_export_mode = false;
+                ui.open_popup = "file";
+            } else if (choice >= 1) {
+                file_export_mode = false;
+                export_format(static_cast<size_t>(choice - 1));
+            }
+        } else {
+            if (choice == 0) new_document();
+            if (choice == 1) open();
+            if (choice == 2) save();
+            if (choice == 3) save_as();
+            if (choice == 4) welcome_open = true;
+            if (choice == 5) toggle_outline();
+            if (choice == 6) {
+                file_export_mode = true;
+                ui.open_popup = "file";
+            }
+            if (choice >= 7 && choice - 7 < static_cast<int>(recent_files.size())) {
+                const std::string path = recent_files[static_cast<size_t>(choice - 7)];
+                if (open_from_path(path, false, true) == OpenResult::Error) {
+                    recent_files.erase(std::remove(recent_files.begin(), recent_files.end(), path),
+                                       recent_files.end());
+                    save_settings();
+                }
+            }
+        }
+        if (file_export_mode && ui.open_popup != "file") file_export_mode = false;
 
         if (button(ui, "theme_btn", theme_rect, theme_label)) {
             toggle_theme();
@@ -1235,7 +1268,7 @@ struct App {
         if (selected >= 0 && selected != dialect) {
             const int old = dialect;
             dialect = selected;
-            status = std::string(tr("Диалект: ", "Dialect: ")) + kDialects[dialect];
+            status = tr("Диалект изменён", "Dialect changed");
             // When switching to CommonMark, convert tables to raw pipe paragraphs so user sees
             // they don't work. When switching to GFM, try to convert pipe paragraphs back to tables.
             if (dialect == 0 && old == 1) {
@@ -1498,7 +1531,6 @@ void diag_select(int index, bool edge) {
         doc_dirty = true;
         modified = true;
         diag_editor_open = false;
-        tools_tab = 0;
     }
 
     void draw_diag_editor() {
@@ -1676,6 +1708,9 @@ void handle_key(const SDL_KeyboardEvent& key) {
                     mark_edited();
                 }
                 break;
+            case SDLK_K:
+                if (ctrl && !shift) link_open_dialog();
+                break;
             case SDLK_L:
                 if (ctrl && shift) { editor.set_block(md::BlockType::ListItem); mark_edited(); }
                 break;
@@ -1705,6 +1740,9 @@ void handle_key(const SDL_KeyboardEvent& key) {
             case SDLK_TAB:
                 if (editor.in_table()) {
                     editor.table_step(!shift);
+                } else if (editor.code_tab(shift)) {
+                    mark_edited();
+                    ensure_caret_visible();
                 } else if (editor.indent(shift ? -1 : 1)) {
                     mark_edited();
                 }
@@ -1738,6 +1776,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
             zoom_anchor_doc_y = -1.0f;
         }
         zoom = new_zoom;
+        save_settings();
         fontbook.set_zoom(zoom);
         doc_dirty = true; // force a relayout with the new zoom
     }
@@ -1747,6 +1786,208 @@ void handle_key(const SDL_KeyboardEvent& key) {
         editor.click(layout, fontbook, x - doc_viewport.x,
                      y - doc_viewport.y + scroll_y, extend);
         ensure_caret_visible();
+    }
+
+    // ---------- links ----------
+
+    static bool is_image_path(const std::string& path) {
+        const size_t dot = path.find_last_of('.');
+        if (dot == std::string::npos) return false;
+        std::string ext = path.substr(dot + 1);
+        for (char& c : ext) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif"
+            || ext == "webp" || ext == "bmp" || ext == "svg";
+    }
+
+    void link_open_dialog() {
+        if (editor.caret_block().type == md::BlockType::CodeBlock) {
+            status = tr("В блоке кода ссылку не вставить", "Links do not go into code blocks");
+            return;
+        }
+        link_text_value = editor.has_selection() ? editor.selected_text() : std::string();
+        if (link_text_value.find('\n') != std::string::npos) link_text_value.clear();
+        link_href_value.clear();
+        link_field = link_text_value.empty() ? 0 : 1;
+        link_open = true;
+        find_focus = false;
+    }
+
+    // A picked file is stored relative to the document when it lies in the same folder or below.
+    std::string link_path_for(const std::string& picked) const {
+        if (file_path.empty()) return picked;
+        namespace fs = std::filesystem;
+        const fs::path base = fs::u8path(file_path).parent_path();
+        const fs::path rel = fs::u8path(picked).lexically_relative(base);
+        const std::string text = rel.generic_u8string();
+        if (rel.empty() || text.rfind("..", 0) == 0) return picked;
+        return text;
+    }
+
+    void link_pick_file() {
+        const std::string picked = dialogs::open_any_file();
+        if (picked.empty()) return;
+        link_href_value = link_path_for(picked);
+        if (link_text_value.empty()) {
+            link_text_value = std::filesystem::u8path(picked).filename().u8string();
+        }
+    }
+
+    void link_apply() {
+        std::string href = link_href_value;
+        while (!href.empty() && href.front() == ' ') href.erase(0, 1);
+        while (!href.empty() && href.back() == ' ') href.pop_back();
+        if (href.empty()) {
+            status = tr("Укажите адрес ссылки", "Enter a link address");
+            return;
+        }
+        std::string text = link_text_value;
+        if (text.empty()) {
+            text = md::is_web_link(href) ? href : std::filesystem::u8path(href).filename().u8string();
+        }
+        if (text.empty()) text = href;
+        editor.insert_link(text, href, is_image_path(href));
+        link_open = false;
+        mark_edited();
+        ensure_caret_visible();
+        history.commit(doc, editor.caret(), editor.anchor(), md::EditKind::Other);
+        status = tr("Ссылка вставлена", "Link inserted");
+    }
+
+    void link_key(SDL_Keycode key, SDL_Keymod mod) {
+        std::string& field = link_field == 0 ? link_text_value : link_href_value;
+        switch (key) {
+            case SDLK_ESCAPE:
+                link_open = false;
+                break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+                link_apply();
+                break;
+            case SDLK_TAB:
+                link_field = 1 - link_field;
+                break;
+            case SDLK_BACKSPACE:
+                if (!field.empty()) {
+                    size_t start = field.size() - 1;
+                    while (start > 0 && (static_cast<unsigned char>(field[start]) & 0xC0) == 0x80) --start;
+                    field.erase(start);
+                }
+                break;
+            case SDLK_V:
+                if (mod & SDL_KMOD_CTRL) {
+                    char* clip = SDL_GetClipboardText();
+                    std::string t = clip ? clip : "";
+                    SDL_free(clip);
+                    for (char& c : t) {
+                        if (c == '\n' || c == '\r') c = ' ';
+                    }
+                    field += t;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    // Local files go to the system through a file:// address; Windows takes the path itself.
+    static std::string file_url(const std::filesystem::path& p) {
+        const std::string utf8 = std::filesystem::absolute(p).u8string();
+#ifdef _WIN32
+        return utf8;
+#else
+        std::string out = "file://";
+        for (const unsigned char c : utf8) {
+            const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '.' || c == '_' || c == '~';
+            if (plain) {
+                out += static_cast<char>(c);
+            } else {
+                char buf[4];
+                std::snprintf(buf, sizeof(buf), "%%%02X", static_cast<unsigned>(c));
+                out += buf;
+            }
+        }
+        return out;
+#endif
+    }
+
+    void open_link(const std::string& href) {
+        if (md::is_web_link(href)) {
+            SDL_OpenURL(href.c_str());
+            return;
+        }
+        namespace fs = std::filesystem;
+        fs::path target = fs::u8path(href);
+        if (target.is_relative() && !file_path.empty()) {
+            target = fs::u8path(file_path).parent_path() / target;
+        }
+        std::error_code ec;
+        if (!fs::exists(target, ec)) {
+            status = tr("Файл не найден", "File not found");
+            return;
+        }
+        SDL_OpenURL(file_url(target).c_str());
+    }
+
+    // The link under a window point, if any.
+    bool link_at(float x, float y, std::string& href) {
+        if (!ui::contains(doc_viewport, x, y)) return false;
+        const md::Pos p = md::hit_test(doc, layout, fontbook, x - doc_viewport.x,
+                                       y - doc_viewport.y + scroll_y);
+        if (p.block < 0 || p.block >= static_cast<int>(doc.blocks.size())) return false;
+        const std::vector<md::Inline>& inls = md::inlines_of(doc.blocks[p.block], p.cell);
+        if (p.inl < 0 || p.inl >= static_cast<int>(inls.size())) return false;
+        const md::Inline& inl = inls[static_cast<size_t>(p.inl)];
+        if (!(inl.style & md::StyleLink) || inl.href.empty()) return false;
+        href = inl.href;
+        return true;
+    }
+
+    // Ctrl over a link shows a hand: Ctrl+click opens it.
+    void update_link_cursor() {
+        std::string href;
+        const bool over = (SDL_GetModState() & SDL_KMOD_CTRL) && !link_open && !welcome_open
+            && !pandoc_help_open && link_at(ui.input.mouse_x, ui.input.mouse_y, href);
+        SDL_SetCursor(over && hand_cursor ? hand_cursor : SDL_GetDefaultCursor());
+    }
+
+    void draw_link_dialog() {
+        if (!link_open) return;
+        using namespace ui;
+        const float w = std::min(520.0f, static_cast<float>(width) - 32.0f);
+        const float h = 214.0f;
+        const Rect bg{(static_cast<float>(width) - w) / 2.0f, (static_cast<float>(height) - h) / 2.0f, w, h};
+        fill_rect(ui, {0, 0, static_cast<float>(width), static_cast<float>(height)}, SDL_Color{0, 0, 0, 145});
+        fill_rounded_rect(ui, bg, 10.0f, ui.palette.panel_bg);
+        stroke_rect(ui, bg, ui.palette.panel_border);
+        draw_text(ui, fonts.bold, tr("Вставить ссылку", "Insert Link"),
+                  bg.x + 20.0f, bg.y + 14.0f, ui.palette.text);
+
+        const float fx = bg.x + 20.0f;
+        const float fw = w - 40.0f;
+        draw_text(ui, fonts.regular, tr("Текст", "Text"), fx, bg.y + 46.0f, ui.palette.text_dim);
+        link_text_box = Rect{fx, bg.y + 66.0f, fw, 30.0f};
+        draw_find_field(link_text_box, link_text_value, tr("Что показать", "What to show"), link_field == 0);
+        draw_text(ui, fonts.regular, tr("Адрес или файл", "Address or file"),
+                  fx, bg.y + 104.0f, ui.palette.text_dim);
+        link_href_box = Rect{fx, bg.y + 124.0f, fw - 116.0f, 30.0f};
+        draw_find_field(link_href_box, link_href_value, "https://", link_field == 1);
+
+        if (button(ui, "lnk_file", Rect{fx + fw - 108.0f, bg.y + 124.0f, 108.0f, 30.0f},
+                   tr("Файл…", "File…"))) {
+            link_pick_file();
+        }
+        if (button(ui, "lnk_ok", Rect{bg.x + w - 150.0f, bg.y + h - 46.0f, 130.0f, 30.0f},
+                   tr("Вставить", "Insert"))) {
+            link_apply();
+        }
+        if (button(ui, "lnk_cancel", Rect{bg.x + w - 290.0f, bg.y + h - 46.0f, 130.0f, 30.0f},
+                   tr("Отмена", "Cancel"))) {
+            link_open = false;
+        }
+        link_card = bg;
     }
 
     // ---------- find and replace ----------
@@ -2062,6 +2303,14 @@ void handle_key(const SDL_KeyboardEvent& key) {
     // Runs one event, then records what it changed for undo.
 
 
+    std::vector<std::string> code_lang_items() const {
+        std::vector<std::string> items;
+        for (const CodeLang& l : kCodeLangs) {
+            items.push_back(l.value[0] == '\0' ? std::string(tr("Без языка", "No language")) : std::string(l.label));
+        }
+        return items;
+    }
+
     void draw_workspace() {
         using namespace ui;
         Rect area{0, toolbar_h, static_cast<float>(width),
@@ -2073,15 +2322,19 @@ void handle_key(const SDL_KeyboardEvent& key) {
             area.w -= kOutlineW;
         }
 
-        const float content_w = std::min(760.0f, area.w - 64.0f);
+        const float content_w = std::min(750.0f, area.w - 64.0f);
         const float content_x = area.x + (area.w - content_w) / 2.0f;
         // The find bar sits above the document and pushes the text down.
         const float top = find_open ? 8.0f + (find_replace_mode ? 76.0f : 36.0f) + 8.0f : 24.0f;
         const Rect viewport{content_x, area.y + top, content_w, area.h - top - 24.0f};
 
+        // The formula the caret is in is laid out as its source; leaving it re-renders it.
+        const md::MathReveal reveal = md::math_reveal_at(doc, editor.caret());
+        if (!(reveal == math_reveal_shown)) doc_dirty = true;
         if (content_w != laid_out_width || zoom != laid_out_zoom || doc_dirty) {
             fontbook.set_zoom(zoom);
-            md::layout_document(doc, fontbook, content_w, layout);
+            md::layout_document(doc, fontbook, content_w, layout, reveal);
+            math_reveal_shown = reveal;
             laid_out_width = content_w;
             laid_out_zoom = zoom;
             doc_dirty = false;
@@ -2111,6 +2364,28 @@ void handle_key(const SDL_KeyboardEvent& key) {
         view.caret = editor.caret();
         md::render_document(ui, doc, layout, fontbook, viewport, scroll_y, &view);
         if (find_open) draw_find_bar(content_x, area.y + 8.0f, content_w, find_replace_mode);
+
+        // Code blocks carry a language menu in their header strip.
+        for (size_t bi = 0; bi < doc.blocks.size() && bi < layout.boxes.size(); ++bi) {
+            md::Block& block = doc.blocks[bi];
+            if (block.type != md::BlockType::CodeBlock || is_visual_lang(block.lang)) continue;
+            const float by = viewport.y + layout.boxes[bi].y - scroll_y;
+            const float top = std::max(by + 8.0f, viewport.y + 4.0f); // a block scrolled under the top edge
+            if (by + 40.0f < viewport.y || top + 24.0f > viewport.y + viewport.h) continue;
+            std::string current = block.lang.empty() ? std::string(tr("язык ↓", "language ↓")) : block.lang + " ↓";
+            for (const CodeLang& l : kCodeLangs) {
+                if (!block.lang.empty() && block.lang == l.value) current = std::string(l.label) + " ↓";
+            }
+            const Rect r{viewport.x + layout.boxes[bi].x + 14.0f, top, 170.0f, 24.0f};
+            const int pick = menu(ui, ("code_lang_" + std::to_string(bi)).c_str(), r, current.c_str(),
+                                  code_lang_items(), 200.0f);
+            if (pick >= 0) {
+                block.lang = kCodeLangs[pick].value;
+                mark_edited();
+                history.commit(doc, editor.caret(), editor.anchor(), md::EditKind::Other);
+            }
+        }
+
 
         if (max_scroll > 0.0f) {
             const float thumb_h = std::max(30.0f,
@@ -2142,14 +2417,21 @@ void handle_key(const SDL_KeyboardEvent& key) {
             right = zbuf + ("  ·  " + right);
         }
         const float right_w = text_width(fonts.regular, right);
-        const float max_w = static_cast<float>(width) - right_w - 48.0f;
+        const float right_x = static_cast<float>(width) - 12.0f - right_w;
 
-        ui::draw_text(ui, fonts.regular, fit_text(fonts.regular, status, max_w), 12.0f, y + 6.0f,
-                  ui.palette.text_dim);
+        const std::string help = tr("Справка о дополнениях", "Extensions help");
+        const float help_w = text_width(fonts.regular, help) + 24.0f;
+        if (button(ui, "status_help", Rect{12.0f, y + 3.0f, help_w, 22.0f}, help.c_str())) {
+            pandoc_help_open = true;
+        }
 
-        ui::draw_text(ui, fonts.regular, right,
-                  static_cast<float>(width) - 12.0f - right_w,
-                  y + 6.0f, ui.palette.text_dim);
+        const float left_x = 12.0f + help_w + 18.0f;
+        std::string left = std::string("• ") + (modified ? tr("изменено", "modified") : tr("сохранено", "saved"));
+        if (!status.empty()) left += std::string("  ·  ") + status;
+        ui::draw_text(ui, fonts.regular, fit_text(fonts.regular, left, right_x - left_x - 24.0f),
+                      left_x, y + 6.0f, ui.palette.text_dim);
+
+        ui::draw_text(ui, fonts.regular, right, right_x, y + 6.0f, ui.palette.text_dim);
     }
 
     // ---------- formula editor (tree-based) ----------
@@ -2506,6 +2788,55 @@ void handle_key(const SDL_KeyboardEvent& key) {
                           ? static_cast<int>(leaf->text.size()) : 0;
     }
 
+    // Puts the formula into the text at the caret as an inline "$...$" run. The
+    // spaces keep it a separate word, which is what makes it count as a formula.
+    void formula_insert_inline() {
+        std::string inner = md::math_to_latex(formula_edit); // "$$...$$"
+        if (inner.size() >= 4) inner = inner.substr(2, inner.size() - 4);
+        for (char& c : inner) {
+            if (c == '\n' || c == '\r') c = ' ';
+        }
+        if (inner.empty() || inner == "\\,") {
+            status = tr("Формула пустая", "The formula is empty");
+            return;
+        }
+        const md::Pos caret = editor.caret();
+        const md::Block& cb = doc.blocks[caret.block];
+        if (cb.type == md::BlockType::CodeBlock || cb.type == md::BlockType::Rule) {
+            status = tr("Поставьте курсор в текстовый абзац", "Put the caret in a text paragraph");
+            return;
+        }
+        const std::vector<md::Inline>& inls = md::inlines_of(cb, caret.cell);
+        char before = 0;
+        char after = 0;
+        if (caret.inl >= 0 && caret.inl < static_cast<int>(inls.size())) {
+            const std::string& text = inls[static_cast<size_t>(caret.inl)].text;
+            const int off = caret.offset;
+            if (off > 0 && off <= static_cast<int>(text.size())) {
+                before = text[static_cast<size_t>(off - 1)];
+            } else if (caret.inl > 0 && !inls[static_cast<size_t>(caret.inl - 1)].text.empty()) {
+                before = inls[static_cast<size_t>(caret.inl - 1)].text.back();
+            }
+            if (off < static_cast<int>(text.size())) {
+                after = text[static_cast<size_t>(off)];
+            } else if (caret.inl + 1 < static_cast<int>(inls.size())
+                       && !inls[static_cast<size_t>(caret.inl + 1)].text.empty()) {
+                after = inls[static_cast<size_t>(caret.inl + 1)].text.front();
+            }
+        }
+        std::string piece = "$" + inner + "$";
+        if (before != 0 && before != ' ') piece = " " + piece;
+        const bool closes_sentence = after == '.' || after == ',' || after == ';' || after == ':'
+            || after == '!' || after == '?' || after == ')';
+        if (after != 0 && after != ' ' && !closes_sentence) piece += " ";
+        editor.insert_text(piece);
+        mark_edited();
+        history.commit(doc, editor.caret(), editor.anchor(), md::EditKind::Other);
+        ensure_caret_visible();
+        formula_editor_open = false;
+        status = tr("Формула вставлена в строку", "Formula inserted inline");
+    }
+
     void formula_apply() {
         std::string inner = md::math_to_latex(formula_edit); // "$$...$$"
         if (inner.size() >= 4) inner = inner.substr(2, inner.size() - 4);
@@ -2531,7 +2862,6 @@ void handle_key(const SDL_KeyboardEvent& key) {
         doc_dirty = true;
         modified = true;
         formula_editor_open = false;
-        tools_tab = 0;
     }
 
     void draw_formula_editor() {
@@ -2656,6 +2986,9 @@ void handle_key(const SDL_KeyboardEvent& key) {
         if (button(ui, "f_cancel", {ox + 314.0f, by, 110.0f, 30.0f}, tr("Отмена", "Cancel"))) {
             formula_editor_open = false;
             status = tr("Редактор формул закрыт", "Formula editor closed");
+        }
+        if (button(ui, "f_inline", {ox + 434.0f, by, 150.0f, 30.0f}, tr("В строку", "Inline"))) {
+            formula_insert_inline();
         }
     }
 
@@ -2829,7 +3162,6 @@ void handle_key(const SDL_KeyboardEvent& key) {
         doc_dirty = true;
         modified = true;
         chart_editor_open = false;
-        tools_tab = 0;
     }
 
     void draw_chart_editor() {
@@ -2946,7 +3278,13 @@ void handle_key(const SDL_KeyboardEvent& key) {
 
 
     void frame() {
+        update_link_cursor();
+        if (geometry_dirty && SDL_GetTicks() - geometry_tick > 500) {
+            geometry_dirty = false;
+            save_settings();
+        }
         SDL_GetRenderOutputSize(renderer, &width, &height);
+        ui.screen_h = static_cast<float>(height);
         SDL_SetRenderDrawColor(renderer, ui.palette.window_bg.r, ui.palette.window_bg.g,
                                ui.palette.window_bg.b, ui.palette.window_bg.a);
         SDL_RenderClear(renderer);
@@ -2956,6 +3294,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
         draw_workspace();
         draw_statusbar();
         draw_formula_editor();
+        draw_link_dialog();
         draw_diag_editor();
         draw_chart_editor();
         auto wrap_lines = [&](TTF_Font* fnt, const std::string& s, float maxw) {
@@ -3024,8 +3363,8 @@ void handle_key(const SDL_KeyboardEvent& key) {
             float y = bg.y + 46.0f;
             {
                 std::string txt = tr(
-                    "Эти меню добавляют блоки (формулы, диаграммы, графики) для вставки. При экспорте через Pandoc поддержка зависит от целевого формата и движка. Разные сайты и программы могут поддерживать разный набор расширений.",
-                    "These menus insert visual blocks (formulas, diagrams, charts). When exporting via Pandoc, support depends on the target format and engine. Different websites and apps support different Markdown extensions.");
+                    "Формулы, диаграммы и графики вставляются кнопками «Формула», «Диаграмма» и «График» на панели, готовые примеры — в меню «Шаблоны ↓». Экспорт в DOCX, PDF, HTML, ODT и EPUB — в меню «Файл» → «Экспорт ›». Через Pandoc поддержка зависит от целевого формата и движка, а сайты и программы поддерживают разный набор расширений.",
+                    "Formulas, diagrams and charts are inserted with the Formula, Diagram and Chart buttons on the toolbar; ready-made examples are under Templates ↓. Export to DOCX, PDF, HTML, ODT and EPUB is in the File menu → Export ›. Via Pandoc, support depends on the target format and engine, and websites and apps support different extensions.");
                 auto lines = wrap_lines(fonts.regular, txt, w - 32.0f);
                 for (auto& l : lines) {
                     ui::draw_text(ui, fonts.regular, l, bg.x+16.0f, y, ui.palette.text);
@@ -3069,7 +3408,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
         if (welcome_open) {
             using namespace ui;
             const float w = std::min(680.0f, static_cast<float>(width) - 32.0f);
-            const float h = std::min(510.0f, static_cast<float>(height) - 32.0f);
+            const float h = std::min(600.0f, static_cast<float>(height) - 32.0f);
             const Rect bg{(static_cast<float>(width) - w) / 2.0f,
                           (static_cast<float>(height) - h) / 2.0f, w, h};
             ui::fill_rect(ui, {0, 0, static_cast<float>(width), static_cast<float>(height)},
@@ -3109,22 +3448,30 @@ void handle_key(const SDL_KeyboardEvent& key) {
                 const char* desc_en;
             };
             static const Feature feats[] = {
-                {"Живое форматирование и стили",
-                 "Live Formatting & Styles",
-                 "Жирный (Ctrl+B), курсив (Ctrl+I), зачёркнутый и моноширинный код (Ctrl+E), заголовки H1–H3 (Ctrl+1..3), списки, цитаты и разделители.",
-                 "Bold (Ctrl+B), italic (Ctrl+I), strikethrough, inline code (Ctrl+E), headings H1–H3 (Ctrl+1..3), bullet/numbered lists, quotes, and rules."},
-                {"Визуальные формулы, диаграммы и графики",
-                 "Visual Formulas, Diagrams & Charts",
-                 "Во вкладке «Дополнения» создавайте математические формулы, блок-схемы, диаграммы последовательности и графики (столбчатые, линейные, круговые). Клик по объекту открывает визуальный конструктор.",
-                 "In the 'Extras' tab, build math formulas, flowcharts, sequence diagrams, and charts (bar, line, pie). Click any object in the document to reopen its visual editor."},
-                {"Таблицы GFM и автоопределение диалекта",
-                 "GFM Tables & Dialect Detection",
-                 "В режиме GitHub Flavored Markdown создавайте таблицы, управляйте строками, столбцами и выравниванием (Tab — переход по ячейкам). При открытии файла диалект определяется автоматически.",
-                 "In GitHub Flavored Markdown mode, insert tables, add/remove rows and columns, and align cells (Tab moves between cells). Dialect is detected automatically on open."},
-                {"Экспорт через Pandoc и темы оформления",
-                 "Pandoc Export & Themes",
-                 "Экспортируйте документ в DOCX, PDF, HTML, ODT и EPUB в один клик. Переключайте тёмную/светлую тему и язык интерфейса (RU/EN) прямо в верхней панели.",
-                 "Export documents to DOCX, PDF, HTML, ODT, and EPUB in one click. Switch between Dark/Light themes and RU/EN interface language right from the top bar."},
+                {"Живое форматирование",
+                 "Live Formatting",
+                 "Жирный (Ctrl+B), курсив (Ctrl+I), зачёркнутый, код (Ctrl+E), заголовки H₁–H₃ (Ctrl+1…3), списки, цитаты и линии. Ссылки и формулы в строке: $E = mc^2$.",
+                 "Bold (Ctrl+B), italic (Ctrl+I), strikethrough, code (Ctrl+E), headings H₁–H₃ (Ctrl+1…3), lists, quotes and rules. Links and inline formulas: $E = mc^2$."},
+                {"Формулы, диаграммы и графики",
+                 "Formulas, Diagrams & Charts",
+                 "Кнопки «Формула», «Диаграмма» и «График» вставляют визуальные блоки, «Шаблоны ↓» дают готовые примеры. Клик по блоку открывает его конструктор.",
+                 "The Formula, Diagram and Chart buttons insert visual blocks, Templates ↓ gives ready examples. Click a block to open its editor."},
+                {"Таблицы и списки",
+                 "Tables & Lists",
+                 "Таблица вставляется кнопкой «Таблица» (диалект GFM). В таблице меню «Таблица ↓» управляет строками, столбцами и выравниванием.",
+                 "The Table button inserts a table (GFM dialect). Inside a table, the Table ↓ menu manages rows, columns and alignment."},
+                {"Поиск, оглавление и масштаб",
+                 "Find, Outline & Zoom",
+                 "Поиск и замена: Ctrl+F и Ctrl+H. Оглавление: Ctrl+Shift+T. Масштаб документа: Ctrl и колесо мыши, от 50% до 200%.",
+                 "Find and replace: Ctrl+F and Ctrl+H. Outline: Ctrl+Shift+T. Document zoom: Ctrl and the mouse wheel, from 50% to 200%."},
+                {"Файлы и экспорт",
+                 "Files & Export",
+                 "Автосохранение с восстановлением, недавние файлы в меню «Файл». Экспорт в DOCX, PDF, HTML, ODT и EPUB: «Файл» → «Экспорт ›» (нужен Pandoc).",
+                 "Autosave with restore, recent files in the File menu. Export to DOCX, PDF, HTML, ODT and EPUB: File → Export › (needs Pandoc)."},
+                {"Темы и языки",
+                 "Themes & Languages",
+                 "Светлая и тёмная темы, интерфейс на русском и английском. Диалект Markdown определяется автоматически при открытии файла.",
+                 "Light and dark themes, Russian and English interface. The Markdown dialect is detected automatically when a file is opened."},
             };
 
             for (const auto& f : feats) {
@@ -3189,10 +3536,30 @@ void handle_key(const SDL_KeyboardEvent& key) {
                     editor_pointer(e.motion.x, e.motion.y, true);
                 }
                 break;
+            case SDL_EVENT_WINDOW_MOVED:
+            case SDL_EVENT_WINDOW_RESIZED:
+                geometry_dirty = true;
+                geometry_tick = SDL_GetTicks();
+                break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 if (e.button.button == SDL_BUTTON_LEFT) {
+                    ui.input.mouse_x = e.button.x;
+                    ui.input.mouse_y = e.button.y;
                     ui.input.down = true;
                     ui.input.pressed = true;
+                    if (link_open) {
+                        if (ui::contains(link_text_box, e.button.x, e.button.y)) link_field = 0;
+                        else if (ui::contains(link_href_box, e.button.x, e.button.y)) link_field = 1;
+                        else if (!ui::contains(link_card, e.button.x, e.button.y)) link_open = false;
+                        break;
+                    }
+                    if ((SDL_GetModState() & SDL_KMOD_CTRL) && !welcome_open && !pandoc_help_open) {
+                        std::string href;
+                        if (link_at(e.button.x, e.button.y, href)) {
+                            open_link(href);
+                            break;
+                        }
+                    }
                     if (find_open && ui::contains(find_bar_rect, e.button.x, e.button.y)) {
                         find_click(e.button.x, e.button.y);
                     }
@@ -3203,7 +3570,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
                     if (welcome_open) {
                         using namespace ui;
                         const float w = std::min(680.0f, static_cast<float>(width) - 32.0f);
-                        const float h = std::min(510.0f, static_cast<float>(height) - 32.0f);
+                        const float h = std::min(600.0f, static_cast<float>(height) - 32.0f);
                         const Rect bg{(static_cast<float>(width) - w) / 2.0f,
                                       (static_cast<float>(height) - h) / 2.0f, w, h};
                         if (!contains(bg, e.button.x, e.button.y)) {
@@ -3273,7 +3640,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
                                 const int new_idx = static_cast<int>(doc.blocks.size()) - 1;
                                 editor.set_caret(md::Pos{new_idx, 0, 0, -1});
                                 mark_edited();
-                                md::layout_document(doc, fontbook, laid_out_width > 0.0f ? laid_out_width : 760.0f, layout);
+                                md::layout_document(doc, fontbook, laid_out_width > 0.0f ? laid_out_width : 760.0f, layout, math_reveal_shown);
                                 max_scroll = std::max(0.0f, layout.content_height - doc_viewport.h + 24.0f);
                                 ensure_caret_visible();
                                 dragging = false;
@@ -3373,6 +3740,8 @@ void handle_key(const SDL_KeyboardEvent& key) {
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
                 if (e.button.button == SDL_BUTTON_LEFT) {
+                    ui.input.mouse_x = e.button.x;
+                    ui.input.mouse_y = e.button.y;
                     ui.input.down = false;
                     // Swallow the release of the click that opened an editor.
                     if (formula_just_opened || diag_just_opened || chart_just_opened) {
@@ -3430,6 +3799,11 @@ void handle_key(const SDL_KeyboardEvent& key) {
                 }
                 break;
             case SDL_EVENT_TEXT_INPUT:
+                if (e.text.text[0] == '\t') break; // Tab is a key here, never typed text
+                if (link_open) {
+                    (link_field == 0 ? link_text_value : link_href_value) += e.text.text;
+                    break;
+                }
                 if (find_open && find_focus) {
                     find_text_input(e.text.text);
                     break;
@@ -3456,6 +3830,10 @@ void handle_key(const SDL_KeyboardEvent& key) {
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.key == SDLK_F1) {
                     welcome_open = !welcome_open;
+                    break;
+                }
+                if (link_open) {
+                    link_key(e.key.key, e.key.mod);
                     break;
                 }
                 if (e.key.key == SDLK_ESCAPE) {
@@ -4704,6 +5082,7 @@ int main(int argc, char** argv) {
                 app.shutdown();
                 return 1;
             }
+    app.ui.open_popup.clear();
             std::printf("selftest file menu ok: new document from menu\n");
         }
 
@@ -4934,17 +5313,10 @@ int main(int argc, char** argv) {
             app.frame();
             expect("welcome modal closes via Escape", !app.welcome_open);
 
-            const ui::Rect table_tab = app.tab_rects[1];
-            click(table_tab.x + table_tab.w / 2.0f, table_tab.y + table_tab.h / 2.0f);
-            expect("table tab opens in GFM", app.tools_tab == 1);
-
-            app.dialect = 0;
-            app.frame();
-            click(table_tab.x + table_tab.w / 2.0f, table_tab.y + table_tab.h / 2.0f);
-            expect("table tab is locked in CommonMark", app.tools_tab == 0);
             app.dialect = 1;
-            app.tools_tab = 1;
             app.editor.set_caret(md::Pos{table_index(), 0, 0, 1});
+            app.frame();
+            expect("table tools show in a table", app.editor.in_table());
             const auto table_dot = screenshot.find_last_of('.');
             save_frame(table_dot == std::string::npos
                 ? screenshot + "_table"
@@ -5237,6 +5609,128 @@ int main(int argc, char** argv) {
             }
         }
 
+        {
+            md::Document mdoc;
+            md::import_markdown("Цена $5 и $10, формула $x^2$ в строке.", true, mdoc);
+            md::Layout lay;
+            md::layout_document(mdoc, app.fontbook, 760.0f, lay);
+            int math_spans = 0;
+            for (const md::Line& line : lay.lines) {
+                for (const md::Span& span : line.spans) math_spans += span.math ? 1 : 0;
+            }
+            const int text_pos = static_cast<int>(mdoc.blocks[0].inlines[0].text.find("$x^2$")) + 2;
+            const md::MathReveal inside = md::math_reveal_at(mdoc, md::Pos{0, -1, 0, -1});
+            const md::MathReveal in_formula = md::math_reveal_at(mdoc, md::Pos{0, 0, text_pos, -1});
+            if (math_spans != 1 || !(inside == md::MathReveal{}) || in_formula.begin < 0) {
+                std::fprintf(stderr, "selftest: inline formulas failed (spans=%d)\n", math_spans);
+                app.shutdown();
+                return 1;
+            }
+        }
+        {
+            md::import_markdown("Текст", true, app.doc);
+            app.editor.set_caret(md::Pos{0, 0, 0});
+            app.editor.set_caret(md::Pos{0, 0, 10});
+            app.formula_editor_open = true;
+            app.formula_edit = md::math_from_latex("x^2");
+            app.formula_insert_inline();
+            const std::string& text = app.doc.blocks[0].inlines[0].text;
+            if (text.rfind("Текст $", 0) != 0 || text.find('$', 8) == std::string::npos
+                || app.formula_editor_open) {
+                std::fprintf(stderr, "selftest: inline formula insert failed (%s)\n", text.c_str());
+                app.shutdown();
+                return 1;
+            }
+        }
+        {
+            md::import_markdown("```rust\nfn main() {}\n```\n", true, app.doc);
+            app.doc_dirty = true;
+            app.scroll_y = 0.0f;
+            app.frame();
+            const float by = app.doc_viewport.y + app.layout.boxes[0].y;
+            const float top = std::max(by + 8.0f, app.doc_viewport.y + 4.0f);
+            const float bx = app.doc_viewport.x + 14.0f + 20.0f;
+            push_mouse_event(SDL_EVENT_MOUSE_MOTION, bx, top + 12.0f);
+            push_mouse_event(SDL_EVENT_MOUSE_BUTTON_DOWN, bx, top + 12.0f);
+            pump();
+            app.frame();
+            push_mouse_event(SDL_EVENT_MOUSE_BUTTON_UP, bx, top + 12.0f);
+            pump();
+            app.frame();
+            const bool opened = app.ui.open_popup == "code_lang_0";
+            const float row_y = top + 24.0f + 4.0f + 24.0f + 12.0f; // second entry: Python
+            push_mouse_event(SDL_EVENT_MOUSE_MOTION, bx, row_y);
+            push_mouse_event(SDL_EVENT_MOUSE_BUTTON_DOWN, bx, row_y);
+            pump();
+            app.frame();
+            push_mouse_event(SDL_EVENT_MOUSE_BUTTON_UP, bx, row_y);
+            pump();
+            app.frame();
+            if (!opened || app.doc.blocks[0].lang != "python") {
+                std::fprintf(stderr, "selftest: code language menu failed (open=%d lang=%s)\n",
+                             opened ? 1 : 0, app.doc.blocks[0].lang.c_str());
+                app.shutdown();
+                return 1;
+            }
+        }
+        {
+            md::import_markdown("```\nab\ncd\n```\n", true, app.doc);
+            app.doc_dirty = true;
+            app.frame();
+            app.editor.set_caret(md::Pos{0, 0, 1});
+            push_key_event(SDLK_TAB);
+            pump();
+            app.frame();
+            const bool single = app.doc.blocks[0].inlines[0].text == "a    b\ncd";
+            md::import_markdown("```\nab\ncd\n```\n", true, app.doc);
+            app.doc_dirty = true;
+            app.frame();
+            app.editor.set_caret(md::Pos{0, 0, 0});
+            app.editor.set_caret(md::Pos{0, 0, 5}, true);
+            push_key_event(SDLK_TAB);
+            pump();
+            app.frame();
+            const bool indented = app.doc.blocks[0].inlines[0].text == "    ab\n    cd";
+            push_key_event(SDLK_TAB, SDL_KMOD_LSHIFT);
+            pump();
+            app.frame();
+            const bool outdented = app.doc.blocks[0].inlines[0].text == "ab\ncd";
+            if (!single || !indented || !outdented) {
+                std::fprintf(stderr, "selftest: code block Tab failed (%d%d%d %s)\n", single ? 1 : 0,
+                             indented ? 1 : 0, outdented ? 1 : 0, app.doc.blocks[0].inlines[0].text.c_str());
+                app.shutdown();
+                return 1;
+            }
+        }
+        {
+            md::import_markdown("Текст рядом\n", true, app.doc);
+            app.doc_dirty = true;
+            app.frame();
+            app.editor.set_caret(md::Pos{0, 0, 11});
+            app.link_open_dialog();
+            app.link_text_value = "сайт";
+            app.link_href_value = "https://example.com";
+            app.link_apply();
+            app.link_text_value = "фото";
+            app.link_href_value = "pics/cat.png";
+            app.link_apply();
+            app.frame();
+            int icons = 0;
+            for (const md::Line& line : app.layout.lines) {
+                for (const md::Span& span : line.spans) icons += span.icon ? 1 : 0;
+            }
+            const std::string md_text = md::export_markdown(app.doc, true);
+            const bool links_ok = md_text.find("[сайт](https://example.com)") != std::string::npos
+                && md_text.find("![фото](pics/cat.png)") != std::string::npos;
+            if (!links_ok || icons != 1 || app.link_open) {
+                std::fprintf(stderr, "selftest: links failed (icons=%d export=%s)\n", icons, md_text.c_str());
+                app.shutdown();
+                return 1;
+            }
+        }
+        std::printf("selftest links ok: insert, export, file thumbnail\n");
+        std::printf("selftest code block tab ok: indent, outdent, selection\n");
+        std::printf("selftest inline formulas and code language ok\n");
         std::printf("selftest find/outline ok: search, replace, word count, outline\n");
         std::printf("selftest edit ok: insert/split/merge/select/delete/roundtrip\n");
         app.shutdown();

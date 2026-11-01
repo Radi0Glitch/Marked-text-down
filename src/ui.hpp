@@ -25,6 +25,7 @@ struct Palette {
     SDL_Color button_pressed;
     SDL_Color button_active;
     SDL_Color accent;
+    SDL_Color link;
     SDL_Color popup_bg;
     SDL_Color popup_border;
 };
@@ -59,6 +60,7 @@ struct Context {
 
     std::string active_id;  // widget the mouse was pressed on
     std::string open_popup; // dropdown id with an open popup
+    float screen_h = 0.0f;  // window height; a list opens upwards when it does not fit below
 
     // Deferred popup drawing, refilled every frame by dropdown().
     struct Popup {

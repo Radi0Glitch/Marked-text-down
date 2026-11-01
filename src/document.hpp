@@ -15,6 +15,7 @@ enum Style : std::uint8_t {
     StyleCode = 1 << 2,
     StyleLink = 1 << 3,
     StyleStrike = 1 << 4,
+    StyleImage = 1 << 5, // with StyleLink: an image, its href is the file or address
 };
 
 enum class BlockType {
@@ -36,6 +37,17 @@ struct Inline {
     Inline(std::string t, std::uint8_t s = 0, std::string h = {})
         : text(std::move(t)), style(s), href(std::move(h)) {}
 };
+
+// A link to the web or by mail, as opposed to a file on disk.
+inline bool is_web_link(const std::string& href) {
+    return href.find("://") != std::string::npos || href.rfind("mailto:", 0) == 0;
+}
+
+// Links to files and every image are drawn as file thumbnails instead of text.
+inline bool is_file_link(const Inline& inl) {
+    if (inl.style & StyleImage) return true;
+    return (inl.style & StyleLink) && !inl.href.empty() && !is_web_link(inl.href);
+}
 
 enum class TableAlign : std::uint8_t { None, Left, Center, Right };
 

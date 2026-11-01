@@ -6,6 +6,7 @@ namespace dialogs {
 
 // Each returns an empty string when the user cancels.
 std::string open_markdown();
+std::string open_any_file();
 std::string save_markdown(const std::string& suggested_name);
 std::string save_export(const std::string& suggested_name, const std::string& filter_pattern,
                         const std::string& filter_desc);

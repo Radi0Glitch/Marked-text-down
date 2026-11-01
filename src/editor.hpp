@@ -39,6 +39,8 @@ public:
 
     // Editing. All of these collapse the selection and reset the blink timer.
     void insert_text(const std::string& utf8); // may contain '\n'
+    // A link, or an image when `image` is set, replaces the selection or goes at the caret.
+    void insert_link(const std::string& text, const std::string& href, bool image);
     void newline();
     void backspace();
     void delete_forward();
@@ -70,6 +72,10 @@ public:
     void table_step(bool forward);
     // Nests (+1) or un-nests (-1) selected list items. False if none is selected.
     bool indent(int delta);
+    // Code blocks: Tab indents by four spaces (every line of a selection), Shift+Tab
+    // removes a leading tab or up to four leading spaces. False when the caret is
+    // outside a code block or Shift+Tab finds nothing to remove.
+    bool code_tab(bool outdent);
     // Puts a horizontal rule after the caret's block and moves the caret below it.
     void insert_rule();
     const Block& caret_block() const { return doc_.blocks[caret_.block]; }

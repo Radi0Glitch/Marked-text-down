@@ -21,35 +21,37 @@ bool contains(Rect r, float px, float py) {
 
 Palette dark_palette() {
     return Palette{
-        .window_bg = {24, 26, 32, 255},
-        .panel_bg = {32, 35, 43, 255},
-        .panel_border = {48, 52, 63, 255},
-        .text = {222, 226, 233, 255},
-        .text_dim = {130, 137, 150, 255},
-        .button_bg = {40, 44, 54, 255},
-        .button_hover = {56, 61, 74, 255},
-        .button_pressed = {70, 76, 92, 255},
-        .button_active = {52, 73, 110, 255},
-        .accent = {110, 168, 254, 255},
-        .popup_bg = {38, 42, 51, 255},
-        .popup_border = {62, 68, 82, 255},
+        .window_bg = {30, 27, 24, 255},
+        .panel_bg = {38, 34, 30, 255},
+        .panel_border = {64, 57, 49, 255},
+        .text = {236, 228, 214, 255},
+        .text_dim = {150, 139, 124, 255},
+        .button_bg = {30, 27, 24, 255},
+        .button_hover = {56, 50, 43, 255},
+        .button_pressed = {70, 62, 54, 255},
+        .button_active = {78, 46, 36, 255},
+        .accent = {222, 112, 84, 255},
+        .link = {120, 190, 255, 255},
+        .popup_bg = {46, 41, 36, 255},
+        .popup_border = {72, 64, 55, 255},
     };
 }
 
 Palette light_palette() {
     return Palette{
-        .window_bg = {250, 251, 253, 255},
-        .panel_bg = {240, 242, 246, 255},
-        .panel_border = {214, 219, 228, 255},
-        .text = {30, 35, 45, 255},
-        .text_dim = {104, 114, 128, 255},
-        .button_bg = {228, 232, 239, 255},
-        .button_hover = {214, 220, 230, 255},
-        .button_pressed = {198, 206, 218, 255},
-        .button_active = {206, 224, 252, 255},
-        .accent = {37, 99, 235, 255},
-        .popup_bg = {255, 255, 255, 255},
-        .popup_border = {198, 205, 216, 255},
+        .window_bg = {246, 243, 236, 255},
+        .panel_bg = {240, 236, 226, 255},
+        .panel_border = {222, 214, 198, 255},
+        .text = {38, 34, 30, 255},
+        .text_dim = {128, 118, 104, 255},
+        .button_bg = {246, 243, 236, 255},
+        .button_hover = {236, 230, 216, 255},
+        .button_pressed = {226, 218, 202, 255},
+        .button_active = {236, 214, 204, 255},
+        .accent = {192, 67, 38, 255},
+        .link = {18, 92, 214, 255},
+        .popup_bg = {252, 250, 245, 255},
+        .popup_border = {222, 214, 198, 255},
     };
 }
 
@@ -61,14 +63,23 @@ void begin_frame(Context& ctx) {
     ctx.popup = Context::Popup{};
 }
 
+// A list opens under its anchor, or above it when there is no room below.
+static Rect popup_list_rect(const Context& ctx, Rect anchor, float list_w, float row_h, size_t count) {
+    const float h = row_h * static_cast<float>(count);
+    const float below = anchor.y + anchor.h + 4.0f;
+    const float above = anchor.y - 4.0f - h;
+    const bool fits_below = ctx.screen_h <= 0.0f || below + h <= ctx.screen_h;
+    const float y = (!fits_below && above >= 0.0f) ? above : below;
+    return Rect{anchor.x, y, list_w, h};
+}
+
 void end_frame(Context& ctx) {
     const Context::Popup& p = ctx.popup;
     if (p.id.empty() || ctx.open_popup != p.id || p.items.empty()) {
         return;
     }
 
-    const Rect list{p.anchor.x, p.anchor.y + p.anchor.h + 4.0f,
-                    p.width, p.row_h * static_cast<float>(p.items.size())};
+    const Rect list = popup_list_rect(ctx, p.anchor, p.width, p.row_h, p.items.size());
     fill_rounded_rect(ctx, list, 6.0f, ctx.palette.popup_bg);
     stroke_rect(ctx, list, ctx.palette.popup_border);
 
@@ -105,16 +116,13 @@ void fill_rounded_rect(Context& ctx, Rect r, float radius, SDL_Color color) {
         return;
     }
 
-    constexpr int kSegments = 6;
-    const SDL_FColor fc = to_fcolor(color);
-
-    std::vector<SDL_Vertex> verts;
-    std::vector<int> indices;
-    verts.reserve(4 * (kSegments + 1) + 1);
-    indices.reserve(4 * (kSegments + 1) * 3);
-
-    // Vertex 0 is the fan center.
-    verts.push_back(SDL_Vertex{{r.x + r.w / 2.0f, r.y + r.h / 2.0f}, fc, {0, 0}});
+    // The edge is feathered over one pixel: an outer ring of the same shape, one
+    // pixel larger and fully transparent, anti-aliases the outline.
+    constexpr int kSegments = 12;
+    constexpr float kFeather = 1.0f;
+    const SDL_FColor inside = to_fcolor(color);
+    SDL_FColor outside = inside;
+    outside.a = 0.0f;
 
     struct Corner { float cx, cy, a0, a1; };
     const Corner corners[4] = {
@@ -123,26 +131,51 @@ void fill_rounded_rect(Context& ctx, Rect r, float radius, SDL_Color color) {
         {r.x + r.w - radius, r.y + r.h - radius, 0.0f, 90.0f},    // bottom-right
         {r.x + radius, r.y + r.h - radius, 90.0f, 180.0f},        // bottom-left
     };
+
+    constexpr int kPerimeter = 4 * (kSegments + 1);
+    SDL_Vertex verts[1 + 2 * kPerimeter];
+    int count = 0;
+    // Vertex 0 is the fan centre, 1..N the inner outline, N+1..2N the feathered outline.
+    verts[count++] = SDL_Vertex{{r.x + r.w / 2.0f, r.y + r.h / 2.0f}, inside, {0, 0}};
     for (const Corner& c : corners) {
         for (int i = 0; i <= kSegments; ++i) {
             const float deg = c.a0 + (c.a1 - c.a0) * static_cast<float>(i) / kSegments;
             const float rad = deg * 3.14159265358979323846f / 180.0f;
-            verts.push_back(SDL_Vertex{
-                {c.cx + radius * std::cos(rad), c.cy + radius * std::sin(rad)},
-                fc, {0, 0}});
+            const float cs = std::cos(rad);
+            const float sn = std::sin(rad);
+            verts[count++] = SDL_Vertex{{c.cx + radius * cs, c.cy + radius * sn}, inside, {0, 0}};
+        }
+    }
+    for (const Corner& c : corners) {
+        for (int i = 0; i <= kSegments; ++i) {
+            const float deg = c.a0 + (c.a1 - c.a0) * static_cast<float>(i) / kSegments;
+            const float rad = deg * 3.14159265358979323846f / 180.0f;
+            const float cs = std::cos(rad);
+            const float sn = std::sin(rad);
+            verts[count++] = SDL_Vertex{
+                {c.cx + (radius + kFeather) * cs, c.cy + (radius + kFeather) * sn}, outside, {0, 0}};
         }
     }
 
-    const int perimeter = static_cast<int>(verts.size()) - 1;
-    for (int i = 0; i < perimeter; ++i) {
-        indices.push_back(0);
-        indices.push_back(1 + i);
-        indices.push_back(1 + (i + 1) % perimeter);
+    int indices[kPerimeter * 9];
+    int idx = 0;
+    for (int i = 0; i < kPerimeter; ++i) {
+        const int a = 1 + i;
+        const int b = 1 + (i + 1) % kPerimeter;
+        const int c = 1 + kPerimeter + i;
+        const int d = 1 + kPerimeter + (i + 1) % kPerimeter;
+        indices[idx++] = 0;
+        indices[idx++] = a;
+        indices[idx++] = b;
+        indices[idx++] = a;
+        indices[idx++] = b;
+        indices[idx++] = d;
+        indices[idx++] = a;
+        indices[idx++] = d;
+        indices[idx++] = c;
     }
 
-    SDL_RenderGeometry(ctx.renderer, nullptr,
-                       verts.data(), static_cast<int>(verts.size()),
-                       indices.data(), static_cast<int>(indices.size()));
+    SDL_RenderGeometry(ctx.renderer, nullptr, verts, count, indices, idx);
 }
 
 void draw_text(Context& ctx, TTF_Font* font, const std::string& text,
@@ -287,8 +320,7 @@ int popup_control(Context& ctx, const char* id, Rect r, const std::string& label
 
     const bool open = ctx.open_popup == id;
     const float row_h = r.h;
-    const Rect list{r.x, r.y + r.h + 4.0f, list_w,
-                    row_h * static_cast<float>(items.size())};
+    const Rect list = popup_list_rect(ctx, r, list_w, row_h, items.size());
 
     if (open) {
         if (ctx.input.pressed && !contains(r, ctx.input.mouse_x, ctx.input.mouse_y)

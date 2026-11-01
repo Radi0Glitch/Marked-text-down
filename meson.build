@@ -1,7 +1,7 @@
 project(
   'Marked-text-down',
   ['c', 'cpp'],
-  version: '1.1.0',
+  version: '1.2.0',
   default_options: ['c_std=c11', 'cpp_std=c++17', 'warning_level=2'],
 )
 
@@ -20,6 +20,7 @@ sources = files(
   'src/markdown_io.cpp',
   'src/search.cpp',
   'src/dialogs.cpp',
+  'src/window_state.cpp',
   'src/math_model.cpp',
   'src/math_draw.cpp',
   'src/diag_model.cpp',
@@ -75,6 +76,9 @@ if host_machine.system() != 'windows'
   install_data('fonts/FiraSans-Regular.ttf', 'fonts/FiraSans-Bold.ttf',
                'fonts/FiraSans-Italic.ttf', 'fonts/FiraSans-BoldItalic.ttf',
                'fonts/FiraMono-Regular.ttf', 'fonts/FiraMono-Bold.ttf',
+               'fonts/PT_Serif-Web-Regular.ttf', 'fonts/PT_Serif-Web-Bold.ttf',
+               'fonts/PT_Serif-Web-Italic.ttf', 'fonts/PT_Serif-Web-BoldItalic.ttf',
+               'fonts/NotoSansMath-Regular.ttf', 'fonts/NotoSans-Regular.ttf',
                install_dir: get_option('datadir') / 'marked-text-down' / 'fonts')
   install_data('marked-text-down.desktop',
                install_dir: get_option('datadir') / 'applications')
