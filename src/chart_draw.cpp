@@ -138,8 +138,30 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
     TTF_Font* ft = face(fonts, 15.0f);
     const float lh = font_h(f);
 
+    // The scale covers every value and always contains zero, so bars grow from the zero line.
+    double vmin = 0.0;
     double vmax = 0.0;
-    for (const std::string& s : m.values) vmax = std::max(vmax, std::fabs(chart_value(s)));
+    for (const std::string& s : m.values) {
+        const double v = chart_value(s);
+        vmin = std::min(vmin, v);
+        vmax = std::max(vmax, v);
+    }
+    // Grid steps are round numbers and the scale ends on grid lines.
+    const double raw_span = vmax > vmin ? vmax - vmin : 1.0;
+    const double raw_step = raw_span / nice_ticks(raw_span);
+    const double magnitude = std::pow(10.0, std::floor(std::log10(raw_step)));
+    double step = magnitude * 10.0;
+    for (const double k : {1.0, 2.0, 2.5, 5.0, 10.0}) {
+        if (k * magnitude >= raw_step) {
+            step = k * magnitude;
+            break;
+        }
+    }
+    vmin = std::floor(vmin / step) * step;
+    vmax = std::ceil(vmax / step) * step;
+    if (vmax <= vmin) vmax = vmin + step;
+    const int ticks = static_cast<int>(std::round((vmax - vmin) / step));
+    const double span = vmax - vmin;
 
     // Size the chart to fit the full block width.
     float total_w = max_w;
@@ -153,6 +175,10 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
     const float plot_x = x + left;
     const float plot_y = y + top_pad;
     const float plot_bottom = plot_y + plot_h;
+    auto y_of = [&](double v) {
+        return plot_bottom - plot_h * static_cast<float>((v - vmin) / span);
+    };
+    const float y0 = y_of(0.0);
 
     if (!ctx) return {total_w, top_pad + plot_h + bottom_pad};
 
@@ -166,12 +192,10 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
     const bool light = ui::is_light_palette(ctx->palette);
     const SDL_Color grid_col = light ? SDL_Color{208, 216, 228, 255} : kGrid;
     set_color(*ctx, grid_col);
-    const int ticks = nice_ticks(vmax);
-    const double step = vmax <= 0.0 ? 1.0 : vmax / static_cast<double>(ticks);
     for (int i = 0; i <= ticks; ++i) {
-        const float ty = plot_bottom - plot_h * (static_cast<float>(i) / static_cast<float>(ticks));
+        const double val = vmin + step * static_cast<double>(i);
+        const float ty = y_of(val);
         SDL_RenderLine(ctx->renderer, plot_x, ty, plot_x + plot_w, ty);
-        const double val = step * static_cast<double>(i);
         std::string lbl = std::to_string(static_cast<long long>(val));
         if (val != static_cast<double>(static_cast<long long>(val))) {
             lbl = std::to_string(val);
@@ -187,6 +211,10 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
     set_color(*ctx, ctx->palette.panel_border);
     SDL_RenderLine(ctx->renderer, plot_x, plot_y, plot_x, plot_bottom);
     SDL_RenderLine(ctx->renderer, plot_x, plot_bottom, plot_x + plot_w, plot_bottom);
+    if (vmin < 0.0) {
+        set_color(*ctx, ctx->palette.text_dim);
+        SDL_RenderLine(ctx->renderer, plot_x, y0, plot_x + plot_w, y0);
+    }
 
     const float group_w = plot_w / static_cast<float>(n);
     std::vector<SDL_FPoint> pts;
@@ -194,10 +222,10 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
 
     for (size_t i = 0; i < n; ++i) {
         const double v = chart_value(m.values[i]);
-        const float h = vmax <= 0.0 ? 0.0f
-                                     : plot_h * static_cast<float>(v / vmax);
+        const float ty = y_of(v);
+        const float h = std::fabs(ty - y0);
+        const float top = std::min(ty, y0);
         const float cx = plot_x + group_w * (static_cast<float>(i) + 0.5f);
-        const float ty = plot_bottom - h;
         const bool sel_cat = is_selected(selected, static_cast<int>(i), false);
         const bool sel_val = is_selected(selected, static_cast<int>(i), true);
 
@@ -205,7 +233,7 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
             pts.push_back({cx, ty});
         } else {
             const float bw = std::max(6.0f, std::min(52.0f, group_w - kBarGap));
-            const ui::Rect br{cx - bw / 2.0f, ty, bw, h};
+            const ui::Rect br{cx - bw / 2.0f, top, bw, h};
             const SDL_Color bc = bar_color(i);
             if (h > 0.0f) {
                 ui::fill_rect(*ctx, br, bc);
@@ -256,8 +284,9 @@ Size render_xy(ui::Context* ctx, FontBook& fonts, const ChartModel& m,
         const std::string vl = fit_chart_label(f, raw_vl, max_cell_w - 6.0f);
         const float vlw = vl.empty() ? std::min(30.0f, max_cell_w - 4.0f)
                                      : std::max(24.0f, ui::text_width(f, vl) + 10.0f);
+        const float anchor = line ? ty : top;
         const float val_y = std::max(y + (m.title.empty() ? 4.0f : kTitleH + 6.0f),
-                                     ty - lh - 9.0f);
+                                     anchor - lh - 9.0f);
         const ui::Rect val_rect{cx - vlw / 2.0f, val_y, vlw, lh + 6.0f};
         if (slots) {
             slots->push_back(Slot{static_cast<int>(i), true, val_rect});
