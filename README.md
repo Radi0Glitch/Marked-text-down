@@ -128,6 +128,19 @@ makensis installer.nsi
 - `dist/Marked-text-down-windows-x86_64/` — portable-версия для Windows.
 - `dist/Marked-text-down-linux-x86_64.tar.gz` — архив сборки для Linux x86_64.
 
+### Проверка подписи релиза
+
+Релизы подписаны GPG-ключом автора. Публичный ключ лежит в файле `KEYS.asc` в репозитории.
+
+Отпечаток ключа: `56B089B00314055750AC5EF1F97C07F236D69415`
+
+```sh
+gpg --import KEYS.asc
+gpg --fingerprint 56B089B00314055750AC5EF1F97C07F236D69415
+gpg --verify Marked-text-down-linux-x86_64.tar.gz.asc Marked-text-down-linux-x86_64.tar.gz
+gpg --verify Marked-text-down-Setup-x86_64.exe.asc Marked-text-down-Setup-x86_64.exe
+```
+
 ---
 
 ## Автотестирование без дисплея (Headless Selftest)
