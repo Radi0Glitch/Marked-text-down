@@ -7,3 +7,4 @@ dist/
 tools/pandoc/
 tools/typst/
 third_party/mingw/
+build-rel/

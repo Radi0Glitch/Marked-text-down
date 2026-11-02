@@ -27,7 +27,7 @@ void FontBook::clear() {
 }
 
 void FontBook::set_zoom(float zoom) {
-    zoom_ = std::clamp(zoom, 0.5f, 2.0f);
+    zoom_ = std::clamp(zoom, 0.5f, 8.0f);
 }
 
 TTF_Font* FontBook::get(Family family, bool bold, bool italic, float size, bool strike) {

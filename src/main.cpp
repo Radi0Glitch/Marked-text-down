@@ -420,6 +420,11 @@ struct App {
     std::string status = "Готово";
     int width = 0;
     int height = 0;
+    // Text and the document column grow with the window; the sizes above are the minimum.
+    float window_scale() const {
+        return std::clamp(std::min(width / 1100.0f, height / 720.0f), 1.0f, 4.0f);
+    }
+    float text_zoom() const { return zoom * window_scale(); }
     bool has_pandoc = false;
     std::string pandoc_path;
     std::string typst_path;
@@ -1771,13 +1776,13 @@ void handle_key(const SDL_KeyboardEvent& key) {
             && cursor_y >= doc_viewport.y && cursor_y <= doc_viewport.y + doc_viewport.h) {
             zoom_anchor_doc_y = scroll_y + (cursor_y - doc_viewport.y);
             zoom_anchor_view_y = cursor_y - doc_viewport.y;
-            zoom_anchor_old_zoom = zoom;
+            zoom_anchor_old_zoom = text_zoom();
         } else {
             zoom_anchor_doc_y = -1.0f;
         }
         zoom = new_zoom;
         save_settings();
-        fontbook.set_zoom(zoom);
+        fontbook.set_zoom(text_zoom());
         doc_dirty = true; // force a relayout with the new zoom
     }
 
@@ -2322,7 +2327,8 @@ void handle_key(const SDL_KeyboardEvent& key) {
             area.w -= kOutlineW;
         }
 
-        const float content_w = std::min(750.0f, area.w - 64.0f);
+        const float doc_zoom = text_zoom();
+        const float content_w = std::min(750.0f * window_scale(), area.w - 64.0f);
         const float content_x = area.x + (area.w - content_w) / 2.0f;
         // The find bar sits above the document and pushes the text down.
         const float top = find_open ? 8.0f + (find_replace_mode ? 76.0f : 36.0f) + 8.0f : 24.0f;
@@ -2331,12 +2337,12 @@ void handle_key(const SDL_KeyboardEvent& key) {
         // The formula the caret is in is laid out as its source; leaving it re-renders it.
         const md::MathReveal reveal = md::math_reveal_at(doc, editor.caret());
         if (!(reveal == math_reveal_shown)) doc_dirty = true;
-        if (content_w != laid_out_width || zoom != laid_out_zoom || doc_dirty) {
-            fontbook.set_zoom(zoom);
+        if (content_w != laid_out_width || doc_zoom != laid_out_zoom || doc_dirty) {
+            fontbook.set_zoom(doc_zoom);
             md::layout_document(doc, fontbook, content_w, layout, reveal);
             math_reveal_shown = reveal;
             laid_out_width = content_w;
-            laid_out_zoom = zoom;
+            laid_out_zoom = doc_zoom;
             doc_dirty = false;
             word_count = md::count_words(doc);
             if (find_open) find_sync();
@@ -2346,7 +2352,7 @@ void handle_key(const SDL_KeyboardEvent& key) {
         // zoom, so the held point moves by the zoom ratio. Keep it under the
         // cursor by shifting the scroll by the same amount.
         if (zoom_anchor_doc_y >= 0.0f) {
-            const float ratio = zoom / zoom_anchor_old_zoom;
+            const float ratio = doc_zoom / zoom_anchor_old_zoom;
             scroll_y = zoom_anchor_doc_y * ratio - zoom_anchor_view_y;
             zoom_anchor_doc_y = -1.0f;
         }

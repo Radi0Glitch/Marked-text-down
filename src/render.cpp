@@ -147,11 +147,12 @@ void render_document(ui::Context& ctx, const Document& doc, const Layout& layout
                 for (const Inline& inl : block.inlines) draw_code += inl.text;
             }
             const bool is_chart = is_diagram && md::is_chart_text(draw_code);
+            const float zc = fonts.zoom();
             SDL_Color bg = is_special() ? code_bg : code_card;
             if (is_special()) {
                 bg = is_formula() ? formula_bg : diag_bg;
                 if (!is_formula()) {
-                    ui::fill_rect(ctx, {origin_x + box.x + 2.0f, by + 6.0f, 3.0f, box.h - 12.0f},
+                    ui::fill_rect(ctx, {origin_x + box.x + 2.0f * zc, by + 6.0f * zc, 3.0f * zc, box.h - 12.0f * zc},
                                   ctx.palette.accent);
                 }
             }
@@ -172,24 +173,24 @@ void render_document(ui::Context& ctx, const Document& doc, const Layout& layout
                 for (const Inline& inl : block.inlines) tex += inl.text;
                 const MathNode node = math_from_latex(tex);
                 mathdraw::render(&ctx, fonts, node,
-                                 origin_x + box.x + 14.0f, by + 10.0f,
-                                 18.0f * fonts.zoom(),
+                                 origin_x + box.x + 14.0f * zc, by + 10.0f * zc,
+                                 18.0f * zc,
                                  nullptr, nullptr);
             } else if (is_diagram && is_chart) {
                 chartdraw::render_block(&ctx, fonts, draw_code,
-                                        origin_x + box.x + 14.0f, by + 10.0f,
-                                        box.w - 28.0f);
+                                        origin_x + box.x + 14.0f * zc, by + 10.0f * zc,
+                                        box.w - 28.0f * zc);
             } else if (is_diagram) {
                 // The diagram is drawn as a native picture; its code stays
                 // invisible until the user opens the editor.
                 diagdraw::render_block(&ctx, fonts, draw_code,
-                                       origin_x + box.x + 14.0f, by + 10.0f,
-                                       box.w - 28.0f);
+                                       origin_x + box.x + 14.0f * zc, by + 10.0f * zc,
+                                       box.w - 28.0f * zc);
             }
             if (!is_formula() && !is_diagram) {
-                const float header_h = 40.0f;
+                const float header_h = 40.0f * zc;
                 for (int i = 0; i < 3; ++i) {
-                    ui::fill_rounded_rect(ctx, {origin_x + box.x + box.w - 22.0f - i * 14.0f, by + 15.0f, 9.0f, 9.0f},
+                    ui::fill_rounded_rect(ctx, {origin_x + box.x + box.w - 22.0f * zc - i * 14.0f * zc, by + 15.0f * zc, 9.0f * zc, 9.0f * zc},
                                           4.5f, SDL_Color{74, 71, 61, 255});
                 }
                 ui::fill_rect(ctx, {origin_x + box.x, by + header_h, box.w, 1.0f}, SDL_Color{58, 56, 47, 255});

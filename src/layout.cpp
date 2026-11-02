@@ -501,7 +501,7 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
                 y += sz.h;
             } else {
                 // Code block: one layout line per source line, no wrapping.
-                y += kCodeHeaderH;
+                y += kCodeHeaderH * z;
                 LineBuilder builder(static_cast<int>(bi), -1, 0, metrics, width);
                 builder.set_default_font(font_for(fonts, block, 0));
                 for (size_t ii = 0; ii < block.inlines.size(); ++ii) {
@@ -535,8 +535,8 @@ void layout_document(const Document& doc, FontBook& fonts, float width, Layout& 
         const std::string& bl2 = block.lang;
         const bool is_formula_b = block.type == BlockType::CodeBlock && (bl2 == "math" || bl2 == "latex" || bl2 == "tex");
         const bool is_diagram_b = block.type == BlockType::CodeBlock && is_diagram_lang(bl2);
-        const float pad = (block.type == BlockType::CodeBlock && !is_formula_b && !is_diagram_b) ? 10.0f
-                        : block.type == BlockType::Quote ? 8.0f : 0.0f;
+        const float pad = (block.type == BlockType::CodeBlock && !is_formula_b && !is_diagram_b) ? 10.0f * z
+                        : block.type == BlockType::Quote ? 8.0f * z : 0.0f;
         out.boxes.push_back(BlockBox{0, box_top - pad, width,
                                      box_bottom - box_top + pad * 2.0f});
     }
